@@ -51,7 +51,8 @@
       width: 100%;
       height: 100%;
       margin: 0;
-      overflow: hidden;
+      overflow-x: hidden;
+      overflow-y: auto;
       background:
         radial-gradient(circle at top left, rgba(125, 211, 252, 0.32), transparent 36%),
         radial-gradient(circle at top right, rgba(191, 219, 254, 0.2), transparent 28%),
@@ -59,6 +60,7 @@
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
       overscroll-behavior: none;
+      -webkit-overflow-scrolling: touch;
       -webkit-font-smoothing: antialiased;
       text-rendering: optimizeLegibility;
     }
@@ -92,6 +94,7 @@
       position: relative;
       width: 100%;
       height: 100%;
+      min-height: 100dvh;
     }
 
     .scene-shell {
@@ -136,7 +139,7 @@
       inset: 0;
       display: grid;
       place-items: center;
-      padding: 24px;
+      padding: max(20px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
       z-index: 30;
       background:
         radial-gradient(circle at top left, rgba(125, 211, 252, 0.22), transparent 34%),
@@ -785,8 +788,63 @@
     }
 
     @media (max-width: 540px) {
+      html, body {
+        min-height: 100dvh;
+      }
+
+      .screen {
+        align-items: flex-start;
+        place-items: start center;
+        overflow-y: auto;
+      }
+
+      .hero-card {
+        width: min(100%, 100vw - 20px);
+        margin: 0 auto;
+      }
+
       .hero-copy h1 {
         font-size: 30px;
+      }
+
+      .hero-copy p {
+        font-size: 14px;
+        line-height: 1.65;
+      }
+
+      .hero-actions {
+        gap: 10px;
+      }
+
+      .primary-btn,
+      .ghost-btn {
+        width: 100%;
+      }
+
+      .hero-side {
+        min-height: auto;
+      }
+
+      .status-badge {
+        width: calc(100vw - 20px);
+        min-width: 0;
+        padding-inline: 12px;
+        font-size: 13px;
+      }
+
+      .fab-group {
+        right: 10px;
+        left: 10px;
+        align-items: stretch;
+      }
+
+      .fab-btn {
+        width: 100%;
+        min-width: 0;
+      }
+
+      .note-panel {
+        width: calc(100vw - 16px);
       }
 
       .hero-card {
@@ -806,6 +864,19 @@
       .panel-actions .danger-btn {
         min-width: calc(50% - 6px);
         flex: 1 1 calc(50% - 6px);
+      }
+
+      .compat-overlay,
+      .drawer-header,
+      .drawer-body,
+      .note-panel-header,
+      .note-panel-body {
+        padding-left: 12px;
+        padding-right: 12px;
+      }
+
+      .drawer {
+        height: min(78vh, 760px);
       }
     }
   </style>
@@ -1038,6 +1109,11 @@
       let toastTimer = null;
       const detectionCanvas = document.createElement('canvas');
       const detectionCtx = detectionCanvas.getContext('2d', { willReadFrequently: true });
+      const PANEL_SMOOTHING = {
+        follow: 0.18,
+        deadZone: 1.5
+      };
+      let panelPositionState = null;
 
       function nowIso() {
         return new Date().toISOString();
@@ -1355,18 +1431,40 @@
         };
       }
 
+      function getCameraRenderRect(video) {
+        if (video && typeof video.getBoundingClientRect === 'function') {
+          const rect = video.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            return rect;
+          }
+        }
+
+        if (dom.sceneShell && typeof dom.sceneShell.getBoundingClientRect === 'function') {
+          const rect = dom.sceneShell.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            return rect;
+          }
+        }
+
+        return {
+          left: 0,
+          top: 0,
+          width: window.innerWidth,
+          height: window.innerHeight
+        };
+      }
+
       function mapDetectionToScreen(detection, video) {
         if (!detection || !video) {
           return null;
         }
 
-        const viewportWidth = window.innerWidth;
-        const viewportHeight = window.innerHeight;
-        const renderScale = Math.max(viewportWidth / video.videoWidth, viewportHeight / video.videoHeight);
+        const renderRect = getCameraRenderRect(video);
+        const renderScale = Math.max(renderRect.width / video.videoWidth, renderRect.height / video.videoHeight);
         const renderedWidth = video.videoWidth * renderScale;
         const renderedHeight = video.videoHeight * renderScale;
-        const offsetX = (viewportWidth - renderedWidth) / 2;
-        const offsetY = (viewportHeight - renderedHeight) / 2;
+        const offsetX = renderRect.left + (renderRect.width - renderedWidth) / 2;
+        const offsetY = renderRect.top + (renderRect.height - renderedHeight) / 2;
         const scaleX = renderedWidth / detection.analysisWidth;
         const scaleY = renderedHeight / detection.analysisHeight;
 
@@ -1376,6 +1474,59 @@
           width: detection.boxWidth * scaleX,
           height: detection.boxHeight * scaleY
         };
+      }
+
+      function positionFloatingPanelFromDetection(detection, video) {
+        if (!dom.floatingPanel || !detection || !video) {
+          return;
+        }
+
+        const panel = dom.floatingPanel;
+        const rect = panel.getBoundingClientRect();
+        const renderRect = getCameraRenderRect(video);
+        const margin = 16;
+
+        const targetX = detection.left;
+        const targetY = detection.top - BLUE_CONFIG.topPadding;
+
+        if (!panelPositionState) {
+          panelPositionState = {
+            x: targetX,
+            y: targetY
+          };
+        }
+
+        let x = panelPositionState.x;
+        let y = panelPositionState.y;
+
+        if (Math.abs(targetX - x) > PANEL_SMOOTHING.deadZone) {
+          x += (targetX - x) * PANEL_SMOOTHING.follow;
+        } else {
+          x = targetX;
+        }
+
+        if (Math.abs(targetY - y) > PANEL_SMOOTHING.deadZone) {
+          y += (targetY - y) * PANEL_SMOOTHING.follow;
+        } else {
+          y = targetY;
+        }
+
+        const halfWidth = Math.max(rect.width / 2, 120);
+        const minX = renderRect.left + halfWidth + margin;
+        const maxX = renderRect.left + renderRect.width - halfWidth - margin;
+        const minY = renderRect.top + rect.height + margin;
+        const maxY = renderRect.top + renderRect.height - margin;
+
+        x = Math.min(Math.max(x, minX), maxX);
+        y = Math.min(Math.max(y, minY), maxY);
+
+        panelPositionState.x = x;
+        panelPositionState.y = y;
+
+        panel.style.left = `${x}px`;
+        panel.style.top = `${y}px`;
+        panel.classList.add('is-visible');
+        panel.setAttribute('aria-hidden', 'false');
       }
 
       function startBlueDetectionLoop() {
@@ -1399,8 +1550,9 @@
             app.targetVisible = Boolean(app.blueDetection);
 
             if (app.blueDetection) {
-              dom.floatingPanel.style.left = `${app.blueDetection.left}px`;
-              dom.floatingPanel.style.top = `${Math.max(20, app.blueDetection.top - BLUE_CONFIG.topPadding)}px`;
+              positionFloatingPanelFromDetection(app.blueDetection, video);
+            } else {
+              panelPositionState = null;
             }
 
             if (detection && !wasVisible) {
@@ -1667,27 +1819,13 @@
               return;
             }
 
-            const viewportWidth = window.innerWidth;
-            const viewportHeight = window.innerHeight;
-            const rect = panel.getBoundingClientRect();
-            const margin = 16;
-
-            let x = detection.left + this.data.xOffset;
-            let y = detection.top + this.data.yOffset - BLUE_CONFIG.topPadding;
-
-            const halfWidth = Math.max(rect.width / 2, 120);
-            const minX = halfWidth + margin;
-            const maxX = viewportWidth - halfWidth - margin;
-            const minY = rect.height + margin;
-            const maxY = viewportHeight - margin;
-
-            x = Math.min(Math.max(x, minX), maxX);
-            y = Math.min(Math.max(y, minY), maxY);
-
-            panel.style.left = `${x}px`;
-            panel.style.top = `${y}px`;
-            panel.classList.add('is-visible');
-            panel.setAttribute('aria-hidden', 'false');
+            positionFloatingPanelFromDetection(
+              {
+                left: detection.left + this.data.xOffset,
+                top: detection.top + this.data.yOffset
+              },
+              appState.videoElement || (arSystem && arSystem.video)
+            );
           }
         });
       }
