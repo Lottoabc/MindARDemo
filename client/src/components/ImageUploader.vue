@@ -61,20 +61,23 @@
         />
       </div>
 
-      <!-- 编译中：显示 spinner + 进度条 -->
-      <div v-if="isCompiling" class="preview-actions">
-        <button class="btn btn-primary" disabled>
+      <!-- 处理中（编译 or 上传）：显示 spinner + 状态 -->
+      <div v-if="isCompiling || isUploading" class="preview-actions">
+        <div class="processing-status">
           <span class="spinner"></span>
-          编译中...
-        </button>
-        <div class="compile-progress-bar">
+          <span class="processing-label">{{ statusMessage || '处理中...' }}</span>
+        </div>
+        <div v-if="isCompiling" class="compile-progress-bar">
           <div
             class="compile-progress-fill"
             :style="{ width: (compileProgress * 100) + '%' }"
           ></div>
         </div>
-        <p class="compile-progress-text">
-          正在分析图片特征... {{ Math.round(compileProgress * 100) }}%
+        <p v-if="isCompiling" class="compile-progress-text">
+          分析图片特征 {{ Math.round(compileProgress * 100) }}%
+        </p>
+        <p v-else class="compile-progress-text">
+          ☁️ 上传编译结果到服务器...
         </p>
       </div>
 
@@ -128,6 +131,8 @@ import { ref } from 'vue'
 const props = defineProps({
   /** 是否正在编译中 */
   isCompiling: { type: Boolean, default: false },
+  /** 是否正在上传中 */
+  isUploading: { type: Boolean, default: false },
   /** 编译进度 0~1 */
   compileProgress: { type: Number, default: 0 },
   /** 编译错误信息 */
@@ -140,6 +145,8 @@ const props = defineProps({
   mindUrl: { type: String, default: '' },
   /** 自动进入 AR 倒计时（秒），0 表示不自动跳转 */
   autoEnterCountdown: { type: Number, default: 0 },
+  /** 当前处理状态描述 */
+  statusMessage: { type: String, default: '' },
 })
 
 const emit = defineEmits([
@@ -380,6 +387,20 @@ function resetImage() {
   border-radius: var(--radius-md);
   max-width: 100%;
   word-break: break-word;
+}
+
+/* ---- 处理状态 ---- */
+.processing-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.processing-label {
+  font-size: var(--font-base);
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
 /* ---- Loading spinner ---- */

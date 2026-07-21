@@ -25,12 +25,14 @@
       <!-- 图片上传与编译组件 -->
       <ImageUploader
         :is-compiling="isCompiling"
+        :is-uploading="isUploading"
         :compile-progress="compileProgress"
         :compile-error="compileError"
         :room-created="roomCreated"
         :room-id="roomId"
         :mind-url="mindUrl"
         :auto-enter-countdown="autoEnterCountdown"
+        :status-message="statusMessage"
         @image-selected="handleImageSelected"
         @image-loaded="handleImageLoaded"
         @enter-ar="goToAR"
@@ -113,6 +115,12 @@ const mindUrl = ref('')
 const autoEnterCountdown = ref(0)
 let countdownTimer = null
 
+/** 是否正在上传中 */
+const isUploading = ref(false)
+
+/** 当前处理状态描述 */
+const statusMessage = ref('')
+
 // ---------------------------------------------------------------------------
 // 事件处理
 // ---------------------------------------------------------------------------
@@ -136,18 +144,22 @@ async function handleImageLoaded(img) {
 
   try {
     // 第一步：客户端编译
+    statusMessage.value = '正在分析图片特征...'
     const result = await compileImage(img)
     mindBlob.value = result.mindBlob
 
     // 第二步：上传 .mind 文件到服务端
+    statusMessage.value = '正在上传到服务器...'
+    isUploading.value = true
     await uploadMindFile(result.mindBlob)
   } catch (err) {
     console.error('[HomeView] 处理失败:', err)
-    // 编译阶段的错误由 useMindAR 设置 compileError
-    // 上传阶段的错误需要在这里手动设置
     if (!compileError.value) {
       compileError.value = err.message || '处理失败，请重试'
     }
+  } finally {
+    isUploading.value = false
+    statusMessage.value = ''
   }
 }
 
@@ -249,6 +261,8 @@ function resetState() {
   roomId.value = ''
   mindUrl.value = ''
   isCompiling.value = false
+  isUploading.value = false
+  statusMessage.value = ''
   compileError.value = null
 }
 </script>
