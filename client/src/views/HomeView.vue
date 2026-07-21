@@ -30,6 +30,7 @@
         :room-created="roomCreated"
         :room-id="roomId"
         :mind-url="mindUrl"
+        :auto-enter-countdown="autoEnterCountdown"
         @image-selected="handleImageSelected"
         @image-loaded="handleImageLoaded"
         @enter-ar="goToAR"
@@ -108,6 +109,10 @@ const roomId = ref('')
 /** .mind 文件在服务端的 URL */
 const mindUrl = ref('')
 
+/** 自动跳转倒计时（秒），0 表示不自动跳转 */
+const autoEnterCountdown = ref(0)
+let countdownTimer = null
+
 // ---------------------------------------------------------------------------
 // 事件处理
 // ---------------------------------------------------------------------------
@@ -138,7 +143,11 @@ async function handleImageLoaded(img) {
     await uploadMindFile(result.mindBlob)
   } catch (err) {
     console.error('[HomeView] 处理失败:', err)
-    // compileError 已被 useMindAR 设置，这里不需要额外处理
+    // 编译阶段的错误由 useMindAR 设置 compileError
+    // 上传阶段的错误需要在这里手动设置
+    if (!compileError.value) {
+      compileError.value = err.message || '处理失败，请重试'
+    }
   }
 }
 
@@ -192,6 +201,18 @@ async function uploadMindFile(blob) {
     roomId: roomId.value,
     mindUrl: mindUrl.value,
   })
+
+  // 3 秒后自动跳转到 AR 场景
+  autoEnterCountdown.value = 3
+  clearInterval(countdownTimer)
+  countdownTimer = setInterval(() => {
+    autoEnterCountdown.value--
+    if (autoEnterCountdown.value <= 0) {
+      clearInterval(countdownTimer)
+      countdownTimer = null
+      goToAR()
+    }
+  }, 1000)
 }
 
 /**
@@ -215,14 +236,18 @@ function goToAR() {
  * 重置所有状态（重新选择图片）
  */
 function resetState() {
+  // 清除自动跳转倒计时
+  if (countdownTimer) {
+    clearInterval(countdownTimer)
+    countdownTimer = null
+  }
+  autoEnterCountdown.value = 0
   selectedImageFile.value = null
   imageElement.value = null
   mindBlob.value = null
   roomCreated.value = false
   roomId.value = ''
   mindUrl.value = ''
-  // compileProgress 和 compileError 由 useMindAR 内部管理，
-  // 这里需要显式重置
   isCompiling.value = false
   compileError.value = null
 }
