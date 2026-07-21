@@ -211,6 +211,9 @@ export function useCollaboration() {
       return
     }
 
+    // 乐观更新：先应用到本地，再发送服务端
+    // （服务端广播 element-updated 时排除发送者，所以必须本地先更新）
+    Object.assign(el, updates)
     socket.emit('element-update', { id, updates })
   }
 

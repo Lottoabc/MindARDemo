@@ -41,6 +41,7 @@
     <DOMOverlay
       v-if="sceneReady"
       :visible="targetDetected"
+      @toast="showToast"
     />
 
     <!-- 底部编辑工具栏（始终可见，方便检测到目标后立即编辑） -->
@@ -181,15 +182,18 @@ onMounted(async () => {
     // 第三步：等待 Socket 连接成功后加入房间
     if (connected.value) {
       joinRoom(roomId)
-    } else {
-      // 如果 socket 还没连接，等待连接成功
-      const unwatch = watch(connected, (val) => {
-        if (val) {
-          joinRoom(roomId)
-          unwatch() // 只触发一次
-        }
-      })
     }
+
+    // 持续监听连接状态：断线重连后自动重新加入房间
+    let wasConnected = connected.value
+    watch(connected, (isConnected) => {
+      if (isConnected && !wasConnected) {
+        console.log('[ARView] Socket 已重连，重新加入房间')
+        registerListeners()
+        joinRoom(roomId)
+      }
+      wasConnected = isConnected
+    })
 
     sceneReady.value = true
     console.log('[ARView] AR 场景初始化完成')

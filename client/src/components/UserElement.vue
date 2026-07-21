@@ -226,16 +226,18 @@ function onPointerUp() {
 // 内容编辑（contenteditable）
 // ---------------------------------------------------------------------------
 
-function onInput(event) {
-  // 实时更新本地内容（不通过 socket）
-  const text = event.target.innerText || event.target.textContent
-  props.element.content = text
+function onInput() {
+  // 不在此处修改 props，留给 onBlur 统一处理
 }
 
 function onBlur(event) {
   // 失焦时发送最终内容到服务端
-  const text = event.target.innerText || event.target.textContent || ''
+  const text = (event.target.innerText || event.target.textContent || '').trim()
+  if (!text) return  // 空内容不发送
+  // 只有内容真正变化时才发送
   if (text !== props.element.content) {
+    // 乐观更新：先更新本地状态
+    props.element.content = text
     emit('update', props.element.id, { content: text })
   }
 }
