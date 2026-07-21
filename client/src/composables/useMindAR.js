@@ -57,9 +57,11 @@ let aframeTickHandler = null  // requestAnimationFrame 回调引用
  */
 async function compileImage(imageElement) {
   // 检查 MindAR Compiler 是否可用
-  if (!window.MINDAR || !window.MINDAR.Compiler) {
+  // mindar-image.prod.js 将 Compiler 挂载在 window.MINDAR.IMAGE.Compiler
+  const MINDAR = window.MINDAR
+  if (!MINDAR || !(MINDAR.Compiler || MINDAR.IMAGE?.Compiler)) {
     throw new Error(
-      'MindAR 编译器未加载。请确保在 index.html 中引入了 mindar.prod.js（完整版，非 image-aframe 版）。'
+      'MindAR 编译器未加载。请确保在 index.html 中引入了 mindar-image.prod.js。'
     )
   }
 
@@ -68,7 +70,9 @@ async function compileImage(imageElement) {
   compileError.value = null
 
   try {
-    const compiler = new window.MINDAR.Compiler()
+    // 兼容新旧两种路径
+    const CompilerClass = MINDAR.Compiler || MINDAR.IMAGE.Compiler
+    const compiler = new CompilerClass()
 
     // compileImageTargets 接受图片数组，支持批量编译（本项目每次编译一张）
     // 第二个参数是进度回调：(progress: number) => void，progress 范围 0.0 ~ 1.0
