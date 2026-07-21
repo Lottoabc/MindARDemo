@@ -61,19 +61,42 @@
         />
       </div>
 
-      <!-- 编译中：禁用按钮，显示 loading -->
+      <!-- 编译中：显示 spinner + 进度条 -->
       <div v-if="isCompiling" class="preview-actions">
         <button class="btn btn-primary" disabled>
           <span class="spinner"></span>
           编译中...
         </button>
+        <div class="compile-progress-bar">
+          <div
+            class="compile-progress-fill"
+            :style="{ width: (compileProgress * 100) + '%' }"
+          ></div>
+        </div>
+        <p class="compile-progress-text">
+          正在分析图片特征... {{ Math.round(compileProgress * 100) }}%
+        </p>
       </div>
 
-      <!-- 编译完成：显示"进入 AR"按钮 -->
+      <!-- 编译/上传失败：显示错误 + 重试按钮 -->
+      <div v-else-if="compileError" class="preview-actions">
+        <p class="upload-error-text">❌ {{ compileError }}</p>
+        <button class="btn btn-ghost" @click="resetImage">
+          ↩ 重新选择图片
+        </button>
+      </div>
+
+      <!-- 编译完成：显示"进入 AR"按钮 + 倒计时 -->
       <div v-else-if="roomCreated" class="preview-actions">
         <button class="btn btn-primary enter-ar-btn" @click="$emit('enter-ar')">
           🚀 进入 AR 空间
+          <span v-if="autoEnterCountdown > 0" class="countdown-badge">
+            {{ autoEnterCountdown }}s
+          </span>
         </button>
+        <p v-if="autoEnterCountdown > 0" class="auto-enter-hint">
+          {{ autoEnterCountdown }} 秒后自动进入...
+        </p>
         <p class="room-id-display">
           房间号: <strong>{{ roomId }}</strong>
         </p>
@@ -115,6 +138,8 @@ const props = defineProps({
   roomId: { type: String, default: '' },
   /** .mind 文件 URL */
   mindUrl: { type: String, default: '' },
+  /** 自动进入 AR 倒计时（秒），0 表示不自动跳转 */
+  autoEnterCountdown: { type: Number, default: 0 },
 })
 
 const emit = defineEmits([
@@ -283,6 +308,32 @@ function resetImage() {
   width: 100%;
   font-size: var(--font-lg);
   padding: 14px 24px;
+  position: relative;
+}
+
+.countdown-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
+  width: 28px;
+  height: 28px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 700;
+  animation: pulse-badge 1s ease-in-out infinite;
+}
+
+@keyframes pulse-badge {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+}
+
+.auto-enter-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: -4px;
 }
 
 .room-id-display {
@@ -294,6 +345,41 @@ function resetImage() {
   color: var(--color-primary);
   font-family: monospace;
   letter-spacing: 1px;
+}
+
+/* ---- 编译进度条 ---- */
+.compile-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.compile-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-primary), #818cf8);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.compile-progress-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ---- 上传错误提示 ---- */
+.upload-error-text {
+  color: var(--color-danger);
+  font-size: var(--font-sm);
+  text-align: center;
+  padding: 8px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: var(--radius-md);
+  max-width: 100%;
+  word-break: break-word;
 }
 
 /* ---- Loading spinner ---- */
