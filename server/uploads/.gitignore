@@ -1,0 +1,9 @@
+# 忽略上传的图片和 .mind 编译文件
+images/
+mind/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.mind

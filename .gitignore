@@ -1,0 +1,46 @@
+# ============================================================================
+# .gitignore — WebAR 多人协同应用
+# ============================================================================
+
+# --- Node.js ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- 构建产物 ---
+client/dist/
+
+# --- 用户上传的文件 (运行时生成) ---
+server/uploads/images/
+server/uploads/mind/
+server/uploads/*.jpg
+server/uploads/*.jpeg
+server/uploads/*.png
+server/uploads/*.gif
+server/uploads/*.webp
+server/uploads/*.mind
+
+# --- 环境变量 (本地覆盖) ---
+# .env.production 可以提交（只含占位符模板）
+# 但 .env.production.local 含有真实密钥，绝对不能提交
+.env.local
+.env.*.local
+
+# --- IDE / 编辑器 ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS 生成文件 ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- 临时文件 ---
+*.log
+*.tmp
+.temp/

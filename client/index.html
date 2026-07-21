@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+
+    <!--
+      【重要】移动端 AR 适配 Meta 标签：
+      - viewport-fit=cover: iPhone X+ 刘海屏全屏适配
+      - user-scalable=no: 禁止用户手动缩放（AR 场景需保持全屏比例）
+      - apple-mobile-web-app-capable: iOS 添加到主屏幕后全屏运行
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <!--
+      【安全提醒】WebXR 和摄像头 API 要求 HTTPS 或 localhost 环境。
+      如果部署到生产服务器，务必使用 HTTPS，否则摄像头将无法启动。
+    -->
+    <title>WebAR 多人协同</title>
+
+    <!--
+      【MindAR 脚本加载说明】
+      1. aframe.min.js      — A-Frame 3D/VR 框架核心
+      2. mindar.prod.js     — MindAR 完整版（包含 Compiler API，用于客户端编译图片）
+      3. mindar-image-aframe.prod.js — MindAR 图像识别 + A-Frame 组件绑定
+    -->
+    <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+    <style>
+      /* 全局初始化：去除默认边距，确保全屏无白边 */
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        /* 防止 iOS 橡皮筋效果干扰 AR 体验 */
+        position: fixed;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
