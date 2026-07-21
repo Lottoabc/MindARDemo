@@ -465,6 +465,108 @@ app.get('/api/rooms', (req, res) => {
   res.json(roomList);
 });
 
+// 可视化管理页面
+// ---------------------------------------------------------------------------
+app.get('/admin', (req, res) => {
+  const images = [];
+  const minds = [];
+  ['images', 'mind'].forEach(subdir => {
+    const dir = path.join(uploadsDir, subdir);
+    if (fs.existsSync(dir)) {
+      fs.readdirSync(dir).forEach(f => {
+        const url = `${BASE_URL}/uploads/${subdir}/${f}`;
+        if (subdir === 'images') images.push({ name: f, url });
+        else minds.push({ name: f, url });
+      });
+    }
+  });
+
+  const roomList = [];
+  rooms.forEach((room, roomId) => {
+    roomList.push({
+      roomId,
+      users: room.users.size,
+      elements: room.elements.size,
+    });
+  });
+
+  res.send(`<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebAR 后台管理</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#f1f5f9;padding:24px;min-height:100vh}
+h1{font-size:24px;margin-bottom:8px}
+h2{font-size:18px;margin:24px 0 12px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.1)}
+.sub{color:#64748b;font-size:14px;margin-bottom:24px}
+.card{background:#1e293b;border-radius:12px;padding:20px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px}
+.img-card{background:#1e293b;border-radius:12px;overflow:hidden;transition:transform .15s}
+.img-card:hover{transform:scale(1.02)}
+.img-card img{width:100%;height:160px;object-fit:cover;display:block}
+.img-card .info{padding:10px 12px;font-size:12px;color:#94a3b8;word-break:break-all}
+.file-card{display:flex;align-items:center;gap:12px;background:#1e293b;border-radius:12px;padding:16px}
+.file-icon{font-size:32px}
+.file-info{flex:1}
+.file-name{font-size:14px;font-weight:600;word-break:break-all}
+.file-meta{font-size:12px;color:#64748b;margin-top:4px}
+a{color:#818cf8;text-decoration:none;font-size:12px}
+a:hover{text-decoration:underline}
+.stat{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;background:#1e293b;border-radius:8px;font-size:14px}
+.stat-num{font-size:24px;font-weight:700;color:#818cf8}
+.empty{color:#64748b;font-style:italic;padding:24px;text-align:center}
+</style>
+</head>
+<body>
+<h1>📷 WebAR 管理面板</h1>
+<p class="sub">文件浏览 & 房间监控</p>
+
+<div class="card">
+  <div style="display:flex;gap:16px;flex-wrap:wrap">
+    <div class="stat"><span class="stat-num">${images.length}</span> 图片</div>
+    <div class="stat"><span class="stat-num">${minds.length}</span> .mind 文件</div>
+    <div class="stat"><span class="stat-num">${roomList.length}</span> 活跃房间</div>
+  </div>
+</div>
+
+<h2>🖼️ 上传图片</h2>
+${images.length === 0 ? '<p class="empty">暂无图片</p>' : `<div class="grid">${images.map(i => `
+<div class="img-card">
+  <a href="${i.url}" target="_blank"><img src="${i.url}" alt="${i.name}" loading="lazy"></a>
+  <div class="info">${i.name}</div>
+</div>`).join('')}</div>`}
+
+<h2>🧠 .mind 特征文件</h2>
+${minds.length === 0 ? '<p class="empty">暂无文件</p>' : minds.map(m => `
+<div class="file-card">
+  <div class="file-icon">🧠</div>
+  <div class="file-info">
+    <div class="file-name">${m.name}</div>
+    <div class="file-meta"><a href="${m.url}" target="_blank">下载文件</a></div>
+  </div>
+</div>`).join('')}
+
+<h2>🏠 活跃房间</h2>
+${roomList.length === 0 ? '<p class="empty">暂无活跃房间</p>' : roomList.map(r => `
+<div class="file-card">
+  <div class="file-icon">🏠</div>
+  <div class="file-info">
+    <div class="file-name">房间: ${r.roomId}</div>
+    <div class="file-meta">👤 ${r.users} 人在线 · 💬 ${r.elements} 个元素</div>
+  </div>
+</div>`).join('')}
+
+<p style="margin-top:32px;color:#475569;font-size:12px;text-align:center">
+  自动刷新 · <span id="time"></span>
+</p>
+<script>document.getElementById('time').textContent=new Date().toLocaleString()</script>
+</body>
+</html>`);
+});
+
 // ---------------------------------------------------------------------------
 // 启动服务器
 // ---------------------------------------------------------------------------
