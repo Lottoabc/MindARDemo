@@ -146,57 +146,99 @@ function onFileChange(event) {
   emit('image-selected', file)
 
   const reader = new FileReader()
-  reader.onload = async (e) => {
+  reader.onload = (e) => {
     imageSrc.value = e.target.result
-    // 进入裁剪模式
     cropMode.value = true
-    await nextTick()
-    initCropper()
+    // 等 Vue 渲染完 + 图片加载完再初始化 Cropper
+    nextTick(() => {
+      if (cropImgRef.value) {
+        // 图片可能已加载，也可能还没 —— Cropper 2 会自动处理
+        initCropper()
+      }
+    })
   }
   reader.readAsDataURL(file)
 }
 
 function initCropper() {
   if (!cropImgRef.value) return
-  // 销毁旧实例
   if (cropperInstance) {
     cropperInstance.destroy()
     cropperInstance = null
   }
-  cropperInstance = new Cropper(cropImgRef.value, {
-    aspectRatio: 1,           // 方形裁剪区（MindAR 推荐正方形）
-    viewMode: 1,              // 裁剪区不超出图片范围
-    autoCropArea: 0.8,        // 默认选 80% 区域
-    movable: true,
-    zoomable: true,
-    responsive: true,
-    guides: true,
-    background: false,
-  })
+  try {
+    cropperInstance = new Cropper(cropImgRef.value, {
+      aspectRatio: 1,
+      viewMode: 1,
+      autoCropArea: 0.8,
+      movable: true,
+      zoomable: true,
+      responsive: true,
+      guides: true,
+      background: false,
+      ready() {
+        console.log('[Cropper] 裁剪器已就绪')
+      },
+    })
+  } catch (err) {
+    console.error('[Cropper] 初始化失败:', err)
+    // 裁剪失败，跳过裁剪直接编译原图
+    skipCrop()
+  }
+}
+
+function skipCrop() {
+  // 清理 cropper
+  if (cropperInstance) {
+    cropperInstance.destroy()
+    cropperInstance = null
+  }
+  // 不裁剪，直接用原图编译
+  cropMode.value = false
+  const img = new Image()
+  img.onload = () => emit('image-loaded', img)
+  img.src = imageSrc.value
 }
 
 function confirmCrop() {
-  if (!cropperInstance) return
-
-  const canvas = cropperInstance.getCroppedCanvas({
-    width: 512,               // 裁剪输出 512x512（够用且编译快）
-    height: 512,
-  })
-
-  croppedSrc.value = canvas.toDataURL('image/jpeg', 0.9)
-  cropMode.value = false
-
-  // 销毁 cropper 释放内存
-  cropperInstance.destroy()
-  cropperInstance = null
-
-  // 创建 HTMLImageElement 并传给父组件编译
-  const img = new Image()
-  img.onload = () => {
-    console.log('[ImageUploader] 裁剪后图片已就绪:', img.width, 'x', img.height)
-    emit('image-loaded', img)
+  if (!cropperInstance) {
+    skipCrop()
+    return
   }
-  img.src = croppedSrc.value
+
+  try {
+    const canvas = cropperInstance.getCroppedCanvas({
+      width: 512,
+      height: 512,
+    })
+
+    if (!canvas) {
+      console.warn('[Cropper] getCroppedCanvas 返回空，使用原图')
+      skipCrop()
+      return
+    }
+
+    croppedSrc.value = canvas.toDataURL('image/jpeg', 0.9)
+    cropMode.value = false
+
+    cropperInstance.destroy()
+    cropperInstance = null
+
+    const img = new Image()
+    img.onload = () => {
+      console.log('[ImageUploader] 裁剪后图片已就绪:', img.width, 'x', img.height)
+      emit('image-loaded', img)
+    }
+    img.onerror = () => {
+      // 裁剪结果无法加载，fallback 到原图
+      console.warn('[ImageUploader] 裁剪图片加载失败，使用原图')
+      skipCrop()
+    }
+    img.src = croppedSrc.value
+  } catch (err) {
+    console.error('[Cropper] 裁剪失败:', err)
+    skipCrop()
+  }
 }
 
 function resetImage() {
