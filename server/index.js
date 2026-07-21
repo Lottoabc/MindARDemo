@@ -433,6 +433,38 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// 文件列表浏览接口
+// ---------------------------------------------------------------------------
+app.get('/api/files', (req, res) => {
+  const result = {};
+  ['images', 'mind'].forEach(subdir => {
+    const dir = path.join(uploadsDir, subdir);
+    if (fs.existsSync(dir)) {
+      result[subdir] = fs.readdirSync(dir).map(f => ({
+        name: f,
+        url: `${BASE_URL}/uploads/${subdir}/${f}`,
+      }));
+    } else {
+      result[subdir] = [];
+    }
+  });
+  res.json(result);
+});
+
+// 房间数据查询接口
+app.get('/api/rooms', (req, res) => {
+  const roomList = [];
+  rooms.forEach((room, roomId) => {
+    roomList.push({
+      roomId,
+      users: room.users.size,
+      elements: room.elements.size,
+      createdAt: room.createdAt,
+    });
+  });
+  res.json(roomList);
+});
+
 // ---------------------------------------------------------------------------
 // 启动服务器
 // ---------------------------------------------------------------------------
