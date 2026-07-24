@@ -117,6 +117,7 @@ const props = defineProps({
 const emit = defineEmits([
   'image-selected',
   'image-loaded',
+  'image-blob-ready',
   'enter-ar',
   'reset',
 ])
@@ -196,7 +197,13 @@ function skipCrop() {
   // 不裁剪，直接用原图编译
   cropMode.value = false
   const img = new Image()
-  img.onload = () => emit('image-loaded', img)
+  img.onload = () => {
+    emit('image-loaded', img)
+    // 从原图生成 Blob，保持合理分辨率用于上传
+    canvasToBlob(img, img.naturalWidth, img.naturalHeight).then(blob => {
+      emit('image-blob-ready', blob)
+    })
+  }
   img.src = imageSrc.value
 }
 
@@ -207,9 +214,19 @@ function confirmCrop() {
   }
 
   try {
+    // 获取裁剪区域在原始图片上的实际尺寸
+    const cropData = cropperInstance.getData()
+    const cropW = Math.round(cropData.width)
+    const cropH = Math.round(cropData.height)
+
+    // 计算合理的输出分辨率：最大 2048px，不放大，保持清晰度
+    const MAX_SIZE = 2048
+    let outW = Math.min(cropW, MAX_SIZE)
+    let outH = Math.min(cropH, MAX_SIZE)
+
     const canvas = cropperInstance.getCroppedCanvas({
-      width: 512,
-      height: 512,
+      width: outW,
+      height: outH,
     })
 
     if (!canvas) {
@@ -218,7 +235,9 @@ function confirmCrop() {
       return
     }
 
-    croppedSrc.value = canvas.toDataURL('image/jpeg', 0.9)
+    console.log(`[ImageUploader] 裁剪输出: ${outW}x${outH} (原始区域: ${cropW}x${cropH})`)
+
+    croppedSrc.value = canvas.toDataURL('image/jpeg', 0.92)
     cropMode.value = false
 
     cropperInstance.destroy()
@@ -230,15 +249,60 @@ function confirmCrop() {
       emit('image-loaded', img)
     }
     img.onerror = () => {
-      // 裁剪结果无法加载，fallback 到原图
       console.warn('[ImageUploader] 裁剪图片加载失败，使用原图')
       skipCrop()
     }
     img.src = croppedSrc.value
+
+    // 生成 Blob 用于上传（替换原始文件）
+    canvasToBlob(canvas).then(blob => {
+      emit('image-blob-ready', blob)
+    })
   } catch (err) {
     console.error('[Cropper] 裁剪失败:', err)
     skipCrop()
   }
+}
+
+/**
+ * 将 img/canvas 转为 JPEG Blob，保证输出分辨率可控
+ * @param {HTMLImageElement|HTMLCanvasElement} source
+ * @param {number} [maxWidth] - 输出最大宽度
+ * @param {number} [maxHeight] - 输出最大高度
+ * @param {number} [quality=0.92] - JPEG 质量
+ * @returns {Promise<Blob>}
+ */
+function canvasToBlob(source, maxWidth, maxHeight, quality = 0.92) {
+  return new Promise((resolve, reject) => {
+    let w = source.naturalWidth || source.width
+    let h = source.naturalHeight || source.height
+
+    // 如果指定了最大尺寸且源图更大，等比缩放
+    if (maxWidth && w > maxWidth) {
+      const ratio = maxWidth / w
+      w = maxWidth
+      h = Math.round(h * ratio)
+    }
+    if (maxHeight && h > maxHeight) {
+      const ratio = maxHeight / h
+      h = maxHeight
+      w = Math.round(w * ratio)
+    }
+
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(source, 0, 0, w, h)
+    canvas.toBlob(
+      (blob) => {
+        if (blob) resolve(blob)
+        else reject(new Error('canvas.toBlob 失败'))
+      },
+      'image/jpeg',
+      quality
+    )
+  })
 }
 
 function resetImage() {
