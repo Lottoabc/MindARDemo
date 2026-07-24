@@ -262,6 +262,38 @@ function destroyARScene() {
 }
 
 // ---------------------------------------------------------------------------
+// 三、摄像头帧捕获
+// ---------------------------------------------------------------------------
+
+/**
+ * 从当前 AR 场景的摄像头视频流中抓取一帧
+ * 不需要打开文件选择器，毫秒级完成，体验上无停顿感
+ * @returns {HTMLCanvasElement|null} 抓取到的帧 canvas，失败返回 null
+ */
+function captureCameraFrame() {
+  // A-Frame 场景内的 <video> 元素（MindAR 创建的摄像头流）
+  const video = document.querySelector('a-scene video') ||
+                document.querySelector('#ar-container video')
+  if (!video || video.readyState < 2) {
+    console.warn('[MindAR] 无法获取摄像头视频流')
+    return null
+  }
+
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(video, 0, 0)
+    console.log(`[MindAR] 抓取摄像头帧: ${canvas.width}x${canvas.height}`)
+    return canvas
+  } catch (err) {
+    console.error('[MindAR] 抓取摄像头帧失败:', err)
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 导出
 // ---------------------------------------------------------------------------
 export function useMindAR() {
@@ -278,5 +310,8 @@ export function useMindAR() {
     targetDetected,
     cameraReady,
     isSceneRunning,
+
+    // 摄像头帧捕获
+    captureCameraFrame,
   }
 }

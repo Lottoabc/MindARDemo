@@ -29,6 +29,17 @@
           <span class="tool-label">添加文字</span>
         </button>
 
+        <!-- 拍照按钮 — 居中，特殊描边动画 -->
+        <button
+          class="tool-btn capture-btn"
+          :class="{ 'capture-processing': isCapturing }"
+          @click="$emit('capture')"
+          aria-label="拍摄参照物"
+        >
+          <span class="capture-ring"></span>
+          <span class="tool-icon capture-icon">📷</span>
+        </button>
+
         <button
           class="tool-btn"
           @click="addEmojiElement"
@@ -114,7 +125,14 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  /** 是否正在拍照/处理中（按钮显示加载态） */
+  isCapturing: {
+    type: Boolean,
+    default: false,
+  },
 })
+
+const emit = defineEmits(['capture'])
 
 // ---------------------------------------------------------------------------
 // 协同状态
@@ -346,5 +364,61 @@ function finishEditing() {
 .size-arrow {
   font-size: 10px;
   vertical-align: super;
+}
+
+/* ---- 拍照按钮 + 描边动画 ---- */
+.capture-btn {
+  position: relative;
+  padding: 10px 18px;
+  border: 2px solid var(--color-primary);
+  background: rgba(99, 102, 241, 0.12);
+  overflow: visible;
+}
+
+/* 描边光环动画层 */
+.capture-ring {
+  position: absolute;
+  inset: -4px;
+  border-radius: var(--radius-md);
+  border: 2px solid var(--color-primary);
+  animation: capture-pulse 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes capture-pulse {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scale(1);
+    box-shadow: 0 0 6px rgba(99, 102, 241, 0.3);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+    box-shadow: 0 0 18px rgba(99, 102, 241, 0.7), 0 0 36px rgba(129, 140, 248, 0.35);
+  }
+}
+
+/* 处理中：光环加速旋转 */
+.capture-processing .capture-ring {
+  animation: capture-spin 0.8s linear infinite;
+  border-style: dashed;
+}
+
+@keyframes capture-spin {
+  to {
+    transform: rotate(360deg) scale(1.08);
+    opacity: 1;
+    box-shadow: 0 0 22px rgba(99, 102, 241, 0.8);
+  }
+}
+
+.capture-processing {
+  pointer-events: none;
+}
+
+.capture-icon {
+  position: relative;
+  z-index: 1;
+  font-size: 22px;
 }
 </style>
