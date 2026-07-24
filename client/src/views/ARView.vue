@@ -227,27 +227,11 @@ async function handleCapture() {
   showToast('📷 正在截取画面...', 0)
 
   try {
-    let img = null
-
-    // 优先：独立流截帧（Worker 管线）
-    try {
-      img = await captureAsImage()
-    } catch (e) {
-      console.warn('[ARView] 独立流截帧失败，回退:', e.message)
-    }
-
-    // 回退：直接从 A-Frame 场景 video 截帧
+    // 从正在显示的摄像头画面直接截帧
+    const img = await captureFrameToImage()
     if (!img) {
-      const frame = captureCameraFrame()
-      if (!frame) {
-        showToast('❌ 无法获取摄像头画面，请确认已授权摄像头权限', 3000)
-        return
-      }
-      img = await canvasToImage(frame)
-      if (!img) {
-        showToast('❌ 图片处理失败，请重试', 3000)
-        return
-      }
+      showToast('❌ 无法获取摄像头画面，请确认已授权摄像头权限', 3000)
+      return
     }
 
     // 编译 + 上传/热交换
@@ -267,6 +251,25 @@ async function handleCapture() {
   } finally {
     isProcessing.value = false
   }
+}
+
+/** 从当前可见的摄像头画面截帧 → Image */
+function captureFrameToImage() {
+  // 1. 优先：raw video（纯相机模式直接显示的摄像头画面）
+  if (rawVideoRef.value && rawVideoRef.value.readyState >= 2) {
+    const v = rawVideoRef.value
+    const canvas = document.createElement('canvas')
+    canvas.width = v.videoWidth
+    canvas.height = v.videoHeight
+    canvas.getContext('2d').drawImage(v, 0, 0)
+    return canvasToImage(canvas)
+  }
+
+  // 2. 回退：A-Frame 场景内的 video
+  const frame = captureCameraFrame()
+  if (frame) return canvasToImage(frame)
+
+  return null
 }
 
 /** canvas → Image 工具 */
