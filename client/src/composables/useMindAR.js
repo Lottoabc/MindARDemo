@@ -1,47 +1,60 @@
 /**
  * useMindAR.js — MindAR 编译器封装 + A-Frame 场景生命周期管理
  * ============================================================================
- * 两大职责：
+ * 三大职责：
  *
  * 【一、客户端图片编译】
- *   使用 MindAR 官方浏览器端 Compiler API，将用户上传的图片编译为 .mind 特征文件。
- *   流程：HTMLImageElement → compileImageTargets() → exportData() → .mind Blob → 上传到服务端
+ *   使用 MindAR 官方浏览器端 Compiler API，将图片编译为特征数据。
+ *   支持单图编译和合并多图编译。
  *
- * 【二、A-Frame AR 场景管理】
- *   命令式创建/销毁 <a-scene> 及 MindAR 图像追踪组件。
- *   提供 targetDetected 响应式状态供 DOM Overlay 组件驱动 UI 显隐。
+ * 【二、A-Frame AR 场景管理（Multi-Target）】
+ *   命令式创建 A-Frame 场景，支持多个 targetIndex 的 anchor 实体。
+ *   场景和摄像机在热交换期间保持存活——只有 MindAR 追踪系统被替换。
+ *
+ * 【三、摄像头帧捕获】
+ *   从场景 video 元素抓帧（作为 useCameraStream 的回退方案）。
  *
  * 使用方式：
  *   import { useMindAR } from '../composables/useMindAR.js'
- *   const { compileImage, targetDetected, createARScene, destroyARScene } = useMindAR()
+ *   const { compileImage, createARScene, destroyARScene,
+ *           targetDetected, activeTargetIndex, sceneEl } = useMindAR()
  */
 
-import { ref } from 'vue'
+import { ref, shallowRef } from 'vue'
 
 // ---------------------------------------------------------------------------
-// 共享响应式状态
+// 共享响应式状态（模块级单例）
 // ---------------------------------------------------------------------------
 
-/** 编译进度 (0 ~ 1)，用于进度条展示 */
+/** 编译进度 (0 ~ 1) */
 const compileProgress = ref(0)
 /** 是否正在编译中 */
 const isCompiling = ref(false)
 /** 编译错误信息 */
 const compileError = ref(null)
 
-/** AR 场景：当前是否检测到图片目标 */
+/** AR 场景：是否有任意目标被检测到 */
 const targetDetected = ref(false)
+/** AR 场景：当前活跃的目标索引（-1 = 无） */
+const activeTargetIndex = ref(-1)
+/** AR 场景：每个 targetIndex 是否被检测到 */
+const targetStates = ref({})
 /** AR 场景：摄像头是否就绪 */
 const cameraReady = ref(false)
 /** AR 场景：场景是否正在运行 */
 const isSceneRunning = ref(false)
 
 // ---------------------------------------------------------------------------
-// 内部变量（非响应式，用于管理 A-Frame 实例引用）
+// 内部变量（非响应式）
 // ---------------------------------------------------------------------------
-let sceneEl = null        // <a-scene> DOM 元素引用
-let anchorEl = null       // mindar-image-target 实体引用
-let aframeTickHandler = null  // requestAnimationFrame 回调引用
+
+/** <a-scene> DOM 元素引用 */
+let sceneEl = null
+/** targetIndex → anchor HTMLElement 映射 */
+let anchorMap = new Map()
+/** 编译完成回调注册表（供外部注入，在 targetFound 时触发） */
+let targetFoundCallbacks = {}
+let targetLostCallbacks = {}
 
 // ---------------------------------------------------------------------------
 // 一、客户端图片编译
@@ -50,14 +63,10 @@ let aframeTickHandler = null  // requestAnimationFrame 回调引用
 /**
  * 在浏览器中编译图片为 .mind 特征文件
  *
- * @param {HTMLImageElement} imageElement - 用户选择的图片（已加载的 img 元素）
+ * @param {HTMLImageElement|HTMLCanvasElement} source - 图片源
  * @returns {Promise<{ mindBlob: Blob, dataList: Array }>}
- *   mindBlob - 编译后的 .mind 文件二进制数据
- *   dataList - 编译中间结果（调试用）
  */
-async function compileImage(imageElement) {
-  // 检查 MindAR Compiler 是否可用
-  // mindar-image.prod.js 将 Compiler 挂载在 window.MINDAR.IMAGE.Compiler
+async function compileImage(source) {
   const MINDAR = window.MINDAR
   if (!MINDAR || !(MINDAR.Compiler || MINDAR.IMAGE?.Compiler)) {
     throw new Error(
@@ -70,30 +79,22 @@ async function compileImage(imageElement) {
   compileError.value = null
 
   try {
-    // 兼容新旧两种路径
     const CompilerClass = MINDAR.Compiler || MINDAR.IMAGE.Compiler
     const compiler = new CompilerClass()
 
-    // compileImageTargets 接受图片数组，支持批量编译（本项目每次编译一张）
-    // 第二个参数是进度回调：(progress: number) => void，progress 范围 0.0 ~ 1.0
     const dataList = await compiler.compileImageTargets(
-      [imageElement],
-      (progress) => {
-        compileProgress.value = progress
-      }
+      [source],
+      (progress) => { compileProgress.value = progress }
     )
 
-    // 将编译结果导出为 .mind 格式的 ArrayBuffer
     const exportedBuffer = await compiler.exportData()
-
-    // 包装为 Blob，方便后续作为 FormData 上传
     const mindBlob = new Blob([exportedBuffer], {
       type: 'application/octet-stream',
     })
 
     compileProgress.value = 1
     console.log(
-      `[MindAR] 编译完成。dataList 长度: ${dataList.length}, .mind 大小: ${(mindBlob.size / 1024).toFixed(1)} KB`
+      `[MindAR] 编译完成。dataList: ${dataList.length}, .mind: ${(mindBlob.size / 1024).toFixed(1)} KB`
     )
 
     return { mindBlob, dataList }
@@ -107,23 +108,24 @@ async function compileImage(imageElement) {
 }
 
 // ---------------------------------------------------------------------------
-// 二、A-Frame AR 场景管理
+// 二、A-Frame AR 场景管理（Multi-Target）
 // ---------------------------------------------------------------------------
 
 /**
- * 命令式创建 A-Frame + MindAR 图像追踪场景
+ * 命令式创建 A-Frame + MindAR 图像追踪场景（支持多目标）
  *
- * 【为什么命令式创建而不是写 Vue 模板？】
- * A-Frame 通过 Custom Elements 注册 <a-scene>、<a-entity> 等标签。
- * Vue 的模板编译器不认识这些自定义元素，会报警告且可能产生渲染冲突。
- * 因此采用"在 onMounted 中创建 DOM、在 onBeforeUnmount 中销毁"的策略。
+ * 与旧版的关键区别：
+ *   - maxTrack 不再是 1，而是动态的
+ *   - anchor 创建被提取为独立函数，支持热交换后重建
+ *   - 暴露 sceneEl 引用，供外部注入 targetFound/targetLost 回调
  *
- * @param {string} containerId - 用于承载 <a-scene> 的 div 容器 ID
- * @param {string} mindFileUrl - .mind 特征文件的 URL（服务端返回的）
- * @returns {Promise<void>}
+ * @param {string} containerId - 容器 div 的 ID
+ * @param {string} mindFileUrl - .mind 特征文件 URL
+ * @param {number} targetCount - 目标数量（默认 1）
+ * @returns {Promise<HTMLElement>} sceneEl 引用
  */
-async function createARScene(containerId, mindFileUrl) {
-  // 防止重复创建场景
+async function createARScene(containerId, mindFileUrl, targetCount = 1) {
+  // 防止重复创建
   if (sceneEl) {
     console.warn('[MindAR] 场景已存在，先销毁旧场景')
     destroyARScene()
@@ -134,92 +136,46 @@ async function createARScene(containerId, mindFileUrl) {
     throw new Error(`找不到 AR 场景容器元素: #${containerId}`)
   }
 
-  // -----------------------------------------------------------------------
+  // -------------------------------------------------------------------
   // 1. 创建 <a-scene> 根元素
-  //    mindar-image 组件负责初始化 MindAR 图像追踪引擎
-  //    imageTargetSrc 指向编译好的 .mind 文件
-  // -----------------------------------------------------------------------
+  // -------------------------------------------------------------------
   const scene = document.createElement('a-scene')
 
-  // MindAR 图像追踪配置
-  // - imageTargetSrc: .mind 特征文件路径
-  // - maxTrack: 同时追踪的最大目标数（本项目每次只追踪 1 个目标）
-  // - filterMinCFO: 过滤低置信度检测，值越高越严格
   scene.setAttribute(
     'mindar-image',
-    `imageTargetSrc: ${mindFileUrl}; maxTrack: 1; filterMinCFO: 0.05`
+    `imageTargetSrc: ${mindFileUrl}; maxTrack: ${Math.min(targetCount, 5)}; filterMinCFO: 0.05`
   )
 
-  // 关闭 VR 模式 UI（我们是 AR 应用，不需要 VR 头显按钮）
   scene.setAttribute('vr-mode-ui', 'enabled: false')
-
-  // 关闭设备方向权限弹窗（图像追踪 AR 不需要陀螺仪权限）
   scene.setAttribute('device-orientation-permission-ui', 'enabled: false')
 
-  // -----------------------------------------------------------------------
+  // -------------------------------------------------------------------
   // 2. 创建相机
-  //    A-Frame 的 <a-camera> 自动处理 WebRTC 摄像头流
-  //    look-controls 禁用（AR 中不需要鼠标/手指旋转视角）
-  // -----------------------------------------------------------------------
+  // -------------------------------------------------------------------
   const camera = document.createElement('a-camera')
   camera.setAttribute('position', '0 0 0')
   camera.setAttribute('look-controls', 'enabled: false')
-  // iOS 必需：防止全屏接管
   camera.setAttribute('playsinline', '')
   camera.setAttribute('webkit-playsinline', '')
   scene.appendChild(camera)
 
-  // -----------------------------------------------------------------------
-  // 3. 创建图像目标锚点实体
-  //    mindar-image-target 组件会在摄像头识别到图片后自动定位
-  //    targetIndex: 0 表示追踪 .mind 文件中的第 1 个目标
-  //
-  //    子实体 a-plane 用于在 AR 中可视化追踪锚点（调试用，可设为透明）
-  // -----------------------------------------------------------------------
-  const anchor = document.createElement('a-entity')
-  anchor.setAttribute('mindar-image-target', 'targetIndex: 0')
+  // -------------------------------------------------------------------
+  // 3. 创建 targetIndex anchor 实体
+  // -------------------------------------------------------------------
+  for (let i = 0; i < targetCount; i++) {
+    createAnchorForTarget(scene, i)
+  }
 
-  // 添加一个半透明的调试平面（可帮你看到追踪效果，生产可去掉）
-  // 这个平面会精确覆盖在被追踪的图片上
-  const debugPlane = document.createElement('a-plane')
-  debugPlane.setAttribute('position', '0 0 0')
-  debugPlane.setAttribute('width', '1')
-  debugPlane.setAttribute('height', '1')
-  debugPlane.setAttribute('material', 'opacity: 0; transparent: true')
-  anchor.appendChild(debugPlane)
-
-  scene.appendChild(anchor)
-
-  // -----------------------------------------------------------------------
-  // 4. 将场景注入到 DOM 容器中
-  // -----------------------------------------------------------------------
+  // -------------------------------------------------------------------
+  // 4. 注入 DOM
+  // -------------------------------------------------------------------
   container.appendChild(scene)
-
-  // 保存引用
   sceneEl = scene
-  anchorEl = anchor
 
-  // -----------------------------------------------------------------------
-  // 5. 注册目标检测事件
-  //    MindAR 在检测到/丢失图片时会触发 targetFound 和 targetLost 事件
-  // -----------------------------------------------------------------------
-  anchor.addEventListener('targetFound', () => {
-    console.log('[MindAR] 🎯 目标已检测！')
-    targetDetected.value = true
-  })
-
-  anchor.addEventListener('targetLost', () => {
-    console.log('[MindAR] ❌ 目标丢失')
-    targetDetected.value = false
-    // 注意：targetLost 后 DOM Overlay 会淡出，但用户的编辑状态保留在内存中
-  })
-
-  // -----------------------------------------------------------------------
-  // 6. 等待场景加载完成
-  //    A-Frame 场景需要异步初始化，loaded 事件在所有组件初始化后触发
-  // -----------------------------------------------------------------------
+  // -------------------------------------------------------------------
+  // 5. 等待加载完成
+  // -------------------------------------------------------------------
   return new Promise((resolve, reject) => {
-    // 超时处理：如果 15 秒还没加载完，视为失败
     const timeoutId = setTimeout(() => {
       reject(new Error('AR 场景加载超时，请检查摄像头权限和网络连接'))
     }, 15000)
@@ -229,10 +185,9 @@ async function createARScene(containerId, mindFileUrl) {
       console.log('[MindAR] AR 场景加载完成')
       isSceneRunning.value = true
       cameraReady.value = true
-      resolve()
+      resolve(sceneEl)
     })
 
-    // 渲染错误处理
     scene.addEventListener('rendererror', (err) => {
       clearTimeout(timeoutId)
       console.error('[MindAR] 渲染错误:', err)
@@ -242,19 +197,111 @@ async function createARScene(containerId, mindFileUrl) {
 }
 
 /**
+ * 为指定 targetIndex 创建 mindar-image-target 实体
+ */
+function createAnchorForTarget(scene, index) {
+  const anchor = document.createElement('a-entity')
+  anchor.setAttribute('mindar-image-target', `targetIndex: ${index}`)
+  anchor.setAttribute('data-target-index', index)
+
+  // 透明调试平面（生产环境可移除，但保留方便调试）
+  const debugPlane = document.createElement('a-plane')
+  debugPlane.setAttribute('position', '0 0 0')
+  debugPlane.setAttribute('width', '1')
+  debugPlane.setAttribute('height', '1')
+  debugPlane.setAttribute('material', 'opacity: 0; transparent: true')
+  anchor.appendChild(debugPlane)
+
+  // 注册检测/丢失事件
+  anchor.addEventListener('targetFound', () => {
+    console.log(`[MindAR] 🎯 targetIndex ${index} 已检测！`)
+    targetStates.value = { ...targetStates.value, [index]: true }
+    targetDetected.value = true
+    activeTargetIndex.value = index
+
+    // 触发外部注入的回调
+    targetFoundCallbacks[index]?.()
+  })
+
+  anchor.addEventListener('targetLost', () => {
+    console.log(`[MindAR] ❌ targetIndex ${index} 丢失`)
+    targetStates.value = { ...targetStates.value, [index]: false }
+    activeTargetIndex.value = -1
+
+    // 检查是否还有其他目标被检测到
+    const anyDetected = Object.values(targetStates.value).some(v => v)
+    if (!anyDetected) {
+      targetDetected.value = false
+    }
+
+    targetLostCallbacks[index]?.()
+  })
+
+  scene.appendChild(anchor)
+  anchorMap.set(index, anchor)
+
+  return anchor
+}
+
+// ---------------------------------------------------------------------------
+// 热交换支持：清除 / 重建 anchor
+// ---------------------------------------------------------------------------
+
+/**
+ * 清除所有 anchor 实体（热交换前调用）
+ */
+function clearAllAnchors() {
+  anchorMap.forEach((anchor) => {
+    anchor.remove()
+  })
+  anchorMap.clear()
+  targetStates.value = {}
+  targetDetected.value = false
+  activeTargetIndex.value = -1
+}
+
+/**
+ * 为所有 targetIndex 重新创建 anchor（热交换后调用）
+ */
+function rebuildAnchors(count) {
+  if (!sceneEl) return []
+  const anchors = []
+  for (let i = 0; i < count; i++) {
+    anchors.push(createAnchorForTarget(sceneEl, i))
+  }
+  return anchors
+}
+
+/**
+ * 注册 targetFound/targetLost 回调（供 ARView 注入业务逻辑）
+ */
+function onTargetFound(index, callback) {
+  targetFoundCallbacks[index] = callback
+}
+
+function onTargetLost(index, callback) {
+  targetLostCallbacks[index] = callback
+}
+
+// ---------------------------------------------------------------------------
+// 销毁
+// ---------------------------------------------------------------------------
+
+/**
  * 销毁 AR 场景，释放摄像头和 WebGL 资源
- * 【重要】必须在 Vue 组件 onBeforeUnmount 中调用，防止内存泄漏
  */
 function destroyARScene() {
   if (sceneEl) {
-    // 移除 A-Frame 场景 DOM 元素
     sceneEl.remove()
     sceneEl = null
-    anchorEl = null
   }
+  anchorMap.clear()
+  targetFoundCallbacks = {}
+  targetLostCallbacks = {}
 
-  // 重置状态
   targetDetected.value = false
+  activeTargetIndex.value = -1
+  targetStates.value = {}
   cameraReady.value = false
   isSceneRunning.value = false
 
@@ -262,16 +309,15 @@ function destroyARScene() {
 }
 
 // ---------------------------------------------------------------------------
-// 三、摄像头帧捕获
+// 三、摄像头帧捕获（回退方案）
 // ---------------------------------------------------------------------------
 
 /**
- * 从当前 AR 场景的摄像头视频流中抓取一帧
- * 不需要打开文件选择器，毫秒级完成，体验上无停顿感
- * @returns {HTMLCanvasElement|null} 抓取到的帧 canvas，失败返回 null
+ * 从 A-Frame 场景内的 <video> 抓帧
+ * （当 useCameraStream 的克隆流不可用时回退到此方案）
+ * @returns {HTMLCanvasElement|null}
  */
 function captureCameraFrame() {
-  // A-Frame 场景内的 <video> 元素（MindAR 创建的摄像头流）
   const video = document.querySelector('a-scene video') ||
                 document.querySelector('#ar-container video')
   if (!video || video.readyState < 2) {
@@ -298,20 +344,32 @@ function captureCameraFrame() {
 // ---------------------------------------------------------------------------
 export function useMindAR() {
   return {
-    // 编译相关
+    // 编译
     compileImage,
     compileProgress,
     isCompiling,
     compileError,
 
-    // 场景相关
+    // 场景
     createARScene,
     destroyARScene,
+    clearAllAnchors,
+    rebuildAnchors,
+    sceneEl: () => sceneEl,
+    anchorMap: () => anchorMap,
+
+    // 状态
     targetDetected,
+    activeTargetIndex,
+    targetStates,
     cameraReady,
     isSceneRunning,
 
-    // 摄像头帧捕获
+    // 回调注入
+    onTargetFound,
+    onTargetLost,
+
+    // 帧捕获
     captureCameraFrame,
   }
 }

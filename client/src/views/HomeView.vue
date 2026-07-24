@@ -122,6 +122,9 @@ const isUploading = ref(false)
 /** 当前处理状态描述 */
 const statusMessage = ref('')
 
+/** 上传后的图片 URL（服务端返回，供 ARView 缓存使用） */
+const uploadedImageUrl = ref('')
+
 // ---------------------------------------------------------------------------
 // 事件处理
 // ---------------------------------------------------------------------------
@@ -204,6 +207,7 @@ async function uploadMindFile(blob) {
       throw new Error(imgData.error || '图片上传失败')
     }
     roomId.value = imgData.roomId
+    uploadedImageUrl.value = imgData.imageUrl || ''
   }
 
   // 关联 roomId 上传 .mind 文件
@@ -250,11 +254,14 @@ function goToAR() {
     return
   }
 
-  // 通过 query 参数传递 mindUrl，避免 ARView 再次请求
+  // 通过 query 参数传递 mindUrl 和 imageUrl
   router.push({
     name: 'AR',
     params: { roomId: roomId.value },
-    query: { mindUrl: mindUrl.value },
+    query: {
+      mindUrl: mindUrl.value,
+      imageUrl: uploadedImageUrl.value,  // 供 ARView 缓存图片用于后续合并编译
+    },
   })
 }
 
@@ -274,6 +281,7 @@ function resetState() {
   roomCreated.value = false
   roomId.value = ''
   mindUrl.value = ''
+  uploadedImageUrl.value = ''
   isCompiling.value = false
   isUploading.value = false
   statusMessage.value = ''
