@@ -26,6 +26,16 @@
     <!-- AR 场景容器 -->
     <div id="ar-container" class="ar-container" ref="arContainerRef"></div>
 
+    <!-- 纯相机模式的摄像头预览（MindAR 未激活时的视频背景） -->
+    <video
+      v-show="rawCameraActive"
+      ref="rawVideoRef"
+      class="raw-camera"
+      playsinline
+      muted
+      autoplay
+    ></video>
+
     <!--
       TargetAnchor 群 — 每个被追踪到的参照物显示一个锚点
     -->
@@ -165,6 +175,10 @@ const mindARActive = computed(() => targetStore.targetCount > 0)
 
 /** 是否已点击开始 */
 const started = ref(false)
+
+/** 纯相机模式的 raw video 是否活跃 */
+const rawCameraActive = ref(false)
+const rawVideoRef = ref(null)
 
 /** 拍照/编译处理中 */
 const isProcessing = ref(false)
@@ -306,6 +320,15 @@ async function handleFirstCapture(img, mindBlob) {
   if (!scene) throw new Error('场景未就绪')
 
   showToast('🎯 正在激活 AR 追踪...', 0)
+
+  // 关闭 raw 摄像头预览（MindAR 会接管背景渲染）
+  if (rawCameraActive.value && rawVideoRef.value) {
+    const tracks = rawVideoRef.value.srcObject?.getVideoTracks() || []
+    tracks.forEach(t => t.stop())
+    rawVideoRef.value.srcObject = null
+    rawCameraActive.value = false
+  }
+
   await startMindAR(scene, newMindUrl, 1)
 
   // 注册 anchor 到 Store
@@ -427,14 +450,19 @@ async function handleStart() {
   }
 
   try {
-    // Step 0: 同步触发摄像头权限请求（必须在用户手势窗口内）
+    // Step 0: 同步触发摄像头权限 + 获取用于背景预览的流
     loadingMessage.value = '正在请求摄像头权限...'
-    const tempStream = await navigator.mediaDevices.getUserMedia({
+    const cameraStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
     })
-    // 权限已授予，先停掉这个临时流（A-Frame 会自己申请）
-    tempStream.getTracks().forEach(t => t.stop())
     console.log('[ARView] 摄像头权限已授予')
+
+    // 纯相机模式：在 raw video 上直接显示摄像头画面
+    // （因为 A-Frame 没有 MindAR 时不会渲染摄像头作为背景）
+    if (!mindUrl.value && rawVideoRef.value) {
+      rawVideoRef.value.srcObject = cameraStream
+      rawCameraActive.value = true
+    }
 
     // Step 1: 安装摄像头流拦截器（必须在 A-Frame 调用 getUserMedia 之前）
     loadingMessage.value = '正在启动摄像头...'
@@ -574,6 +602,15 @@ function retryInit() {
   width: 100%; height: 100%; z-index: 1;
 }
 .ar-container :deep(a-scene) { width: 100% !important; height: 100% !important; }
+
+/* 纯相机模式：raw video 覆盖在 A-Frame 上层 */
+.raw-camera {
+  position: fixed; top: 0; left: 0;
+  width: 100%; height: 100%;
+  z-index: 2;
+  object-fit: cover;
+  pointer-events: none;
+}
 
 /* ---- 纯相机模式提示 ---- */
 .camera-hint {
