@@ -112,19 +112,18 @@ async function compileImage(source) {
 // ---------------------------------------------------------------------------
 
 /**
- * 命令式创建 A-Frame + MindAR 图像追踪场景（支持多目标）
+ * 命令式创建 A-Frame 场景（支持纯相机模式 + MindAR 延迟初始化）
  *
- * 与旧版的关键区别：
- *   - maxTrack 不再是 1，而是动态的
- *   - anchor 创建被提取为独立函数，支持热交换后重建
- *   - 暴露 sceneEl 引用，供外部注入 targetFound/targetLost 回调
+ * 两种模式：
+ *   mindFileUrl 提供 → 直接初始化 MindAR 追踪器
+ *   mindFileUrl 为空   → 仅创建相机（纯预览），之后通过 startMindAR() 激活追踪
  *
  * @param {string} containerId - 容器 div 的 ID
- * @param {string} mindFileUrl - .mind 特征文件 URL
- * @param {number} targetCount - 目标数量（默认 1）
+ * @param {string} [mindFileUrl] - .mind 特征文件 URL（可选，为空时纯相机模式）
+ * @param {number} [targetCount=0] - 目标数量
  * @returns {Promise<HTMLElement>} sceneEl 引用
  */
-async function createARScene(containerId, mindFileUrl, targetCount = 1) {
+async function createARScene(containerId, mindFileUrl, targetCount = 0) {
   // 防止重复创建
   if (sceneEl) {
     console.warn('[MindAR] 场景已存在，先销毁旧场景')
@@ -136,15 +135,20 @@ async function createARScene(containerId, mindFileUrl, targetCount = 1) {
     throw new Error(`找不到 AR 场景容器元素: #${containerId}`)
   }
 
+  const hasMindAR = !!(mindFileUrl && targetCount > 0)
+
   // -------------------------------------------------------------------
   // 1. 创建 <a-scene> 根元素
   // -------------------------------------------------------------------
   const scene = document.createElement('a-scene')
 
-  scene.setAttribute(
-    'mindar-image',
-    `imageTargetSrc: ${mindFileUrl}; maxTrack: ${Math.min(targetCount, 5)}; filterMinCFO: 0.05`
-  )
+  if (hasMindAR) {
+    scene.setAttribute(
+      'mindar-image',
+      `imageTargetSrc: ${mindFileUrl}; maxTrack: ${Math.min(targetCount, 5)}; filterMinCFO: 0.05`
+    )
+  }
+  // 没有 mindFileUrl → 不设置 mindar-image，纯相机模式
 
   scene.setAttribute('vr-mode-ui', 'enabled: false')
   scene.setAttribute('device-orientation-permission-ui', 'enabled: false')
@@ -160,10 +164,12 @@ async function createARScene(containerId, mindFileUrl, targetCount = 1) {
   scene.appendChild(camera)
 
   // -------------------------------------------------------------------
-  // 3. 创建 targetIndex anchor 实体
+  // 3. 创建 targetIndex anchor 实体（仅当有 MindAR 时）
   // -------------------------------------------------------------------
-  for (let i = 0; i < targetCount; i++) {
-    createAnchorForTarget(scene, i)
+  if (hasMindAR) {
+    for (let i = 0; i < targetCount; i++) {
+      createAnchorForTarget(scene, i)
+    }
   }
 
   // -------------------------------------------------------------------
@@ -182,7 +188,7 @@ async function createARScene(containerId, mindFileUrl, targetCount = 1) {
 
     scene.addEventListener('loaded', () => {
       clearTimeout(timeoutId)
-      console.log('[MindAR] AR 场景加载完成')
+      console.log(`[MindAR] 场景加载完成 (MindAR: ${hasMindAR ? '已激活' : '纯相机模式'})`)
       isSceneRunning.value = true
       cameraReady.value = true
       resolve(sceneEl)
@@ -194,6 +200,56 @@ async function createARScene(containerId, mindFileUrl, targetCount = 1) {
       reject(new Error('AR 渲染初始化失败'))
     })
   })
+}
+
+/**
+ * 在已有场景上激活 MindAR 追踪（纯相机模式 → AR 追踪模式）
+ *
+ * 用于首次拍照后：场景已运行，摄像头已就绪，只需注入 MindAR。
+ * A-Frame 会在属性变化时自动初始化 mindar-image-system。
+ *
+ * @param {HTMLElement} scene - <a-scene> 元素
+ * @param {string} mindUrl - .mind 文件 URL
+ * @param {number} targetCount - 目标数量
+ * @returns {Promise<void>}
+ */
+async function startMindAR(scene, mindUrl, targetCount) {
+  if (!scene) throw new Error('scene 为空')
+
+  console.log(`[MindAR] 激活追踪: ${targetCount} 个目标`)
+
+  // 设置 mindar-image 属性 → A-Frame 自动初始化 WASM 追踪器
+  scene.setAttribute(
+    'mindar-image',
+    `imageTargetSrc: ${mindUrl}; maxTrack: ${Math.min(targetCount, 5)}; filterMinCFO: 0.05`
+  )
+
+  // 创建 target anchor 实体
+  for (let i = 0; i < targetCount; i++) {
+    createAnchorForTarget(scene, i)
+  }
+
+  // 等待 MindAR 系统就绪
+  await new Promise((resolve, reject) => {
+    let attempts = 0
+    function check() {
+      attempts++
+      const system = scene.systems?.['mindar-image-system']
+      if (system?.ready) {
+        console.log(`[MindAR] 追踪器就绪 (${attempts} 次检查)`)
+        resolve()
+        return
+      }
+      if (attempts >= 50) {
+        reject(new Error('MindAR 启动超时'))
+        return
+      }
+      requestAnimationFrame(check)
+    }
+    requestAnimationFrame(check)
+  })
+
+  console.log('[MindAR] ✅ AR 追踪已激活')
 }
 
 /**
@@ -352,6 +408,7 @@ export function useMindAR() {
 
     // 场景
     createARScene,
+    startMindAR,
     destroyARScene,
     clearAllAnchors,
     rebuildAnchors,

@@ -1,33 +1,20 @@
 <!--
-  ARView.vue — AR 场景页面（重构版：多目标 + 动态添加 + 非阻塞截图）
+  ARView.vue — AR 场景页面（重构版：直开摄像头，拍照即创建参照物）
   ============================================================================
   页面结构（从底到顶的 z-index 层级）：
     1. ARScene（A-Frame canvas，摄像头画面+3D追踪）          —— z-index: 1
     2. TargetAnchor 群（每个追踪到的参照物显示 emoji+留言）   —— z-index: 15
-    3. DOMOverlay（协同 UI 覆盖层，与旧版兼容）              —— z-index: 10
-    4. EditorToolbar（固定底部工具栏，拍照/添加留言）         —— z-index: 20
-    5. UserPresence（在线用户指示器）                         —— z-index: 15
-    6. TransitionOverlay（热交换蒙版）                        —— z-index: 9999
+    3. EditorToolbar（底部工具栏，始终可见）                 —— z-index: 20
+    4. TransitionOverlay（热交换蒙版）                        —— z-index: 9999
 
-  核心流程：
-    onMounted
-      → installStreamInterceptor()  （拦截 getUserMedia，克隆视频轨）
-      → createARScene()             （创建 A-Frame 场景，初始 1 个 target）
-      → coordinator.init()          （初始化 3D→2D 投影器）
-      → joinRoom + registerListeners
-      → sceneReady = true
+  两种启动模式：
+    【直开模式】/ 路由 — 纯摄像头预览，拍照创建第一个参照物
+    【房间模式】/ar/:roomId?mindUrl=... — 加入已有房间，直接开始追踪
 
-    用户点击拍照
-      → captureAsImage()            （从克隆流抓帧，零干扰）
-      → compileImage()              （单图编译）
-      → registerTarget()            （合并全量编译 → combined .mind）
-      → hotSwap()                   （蒙版遮罩 → 替换追踪数据 → 蒙版消失）
-      → Toast 提示
-
-    targetFound(targetIndex)
-      → TargetAnchor 显示，3D 投影驱动位置，跟随参照物
+  拍照流程：
+    首次拍照: 编译→上传获取roomId→startMindAR()激活追踪→注册目标
+    后续拍照: 合并编译→hotSwap()热交换→追踪无缝更新
 -->
-
 <template>
   <div class="ar-view">
     <!-- ⚠️ 安全上下文警告 -->
@@ -41,7 +28,6 @@
 
     <!--
       TargetAnchor 群 — 每个被追踪到的参照物显示一个锚点
-      热交换后 anchorElements 会更新，Vue 自动重新渲染
     -->
     <TargetAnchor
       v-for="(anchorEl, index) in visibleAnchors"
@@ -51,17 +37,14 @@
       @toast="showToast"
     />
 
-    <!--
-      DOM Overlay 协同层 — 保持与旧版兼容
-      （当 targetDetected 时可见，显示协同用户的手动放置元素）
-    -->
-    <DOMOverlay
-      v-if="sceneReady"
-      :visible="targetDetected"
-      @toast="showToast"
-    />
+    <!-- 纯相机模式提示：还没有任何参照物 -->
+    <div v-if="sceneReady && !mindARActive" class="camera-hint">
+      <div class="hint-icon">📷</div>
+      <p class="hint-text">摄像头已就绪</p>
+      <p class="hint-sub">点击底部拍照按钮，创建第一个 AR 参照物</p>
+    </div>
 
-    <!-- 底部工具栏（始终可见） -->
+    <!-- 底部工具栏 -->
     <EditorToolbar
       v-if="sceneReady"
       :visible="targetDetected"
@@ -71,9 +54,6 @@
       @capture="handleCapture"
       @open-board="openMessageBoard"
     />
-
-    <!-- 在线用户指示器 -->
-    <UserPresence v-if="sceneReady" />
 
     <!-- 留言板弹窗 -->
     <MessageBoard
@@ -95,11 +75,10 @@
 
     <!-- 场景加载错误 -->
     <div v-if="sceneError" class="error-overlay">
-      <p class="error-title">😔 AR 场景初始化失败</p>
+      <p class="error-title">😔 摄像头初始化失败</p>
       <p class="error-detail">{{ sceneError }}</p>
       <div class="error-actions">
         <button class="btn btn-primary" @click="retryInit">重试</button>
-        <button class="btn btn-ghost" @click="goBack">返回首页</button>
       </div>
     </div>
 
@@ -113,14 +92,6 @@
 </template>
 
 <script setup>
-/**
- * ARView 核心编排：
- *   1. 初始化独立摄像头流（拦截 getUserMedia）
- *   2. 创建多目标 AR 场景
- *   3. 拍照 → 编译 → 合并 → 热交换
- *   4. 3D 坐标投影驱动 DOM Overlay
- *   5. 移动端生命周期保护
- */
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMindAR } from '../composables/useMindAR.js'
@@ -133,12 +104,11 @@ import { useTargetStore } from '../stores/useTargetStore.js'
 import { useMessageStore } from '../stores/useMessageStore.js'
 import { API_BASE } from '../config.js'
 
-import DOMOverlay from '../components/DOMOverlay.vue'
 import EditorToolbar from '../components/EditorToolbar.vue'
-import UserPresence from '../components/UserPresence.vue'
 import TargetAnchor from '../components/TargetAnchor.vue'
 import MessageBoard from '../components/MessageBoard.vue'
 import TransitionOverlay from '../components/TransitionOverlay.vue'
+import { v4 as uuidv4 } from 'uuid'
 
 const route = useRoute()
 const router = useRouter()
@@ -147,37 +117,36 @@ const router = useRouter()
 // Composables & Stores
 // ---------------------------------------------------------------------------
 const {
-  createARScene, destroyARScene, targetDetected, activeTargetIndex,
-  cameraReady,
-  compileImage, compileProgress, isCompiling,
-  targetStates, captureCameraFrame,
-  onTargetFound, onTargetLost,
+  createARScene, startMindAR, destroyARScene,
+  targetDetected, activeTargetIndex, cameraReady,
+  compileImage, targetStates,
+  captureCameraFrame,
 } = useMindAR()
 
 const { connected } = useSocket()
-const { joinRoom, leaveRoom, registerListeners, unregisterListeners } = useCollaboration()
+const { joinRoom, registerListeners, unregisterListeners } = useCollaboration()
 const { install: installStreamInterceptor, captureAsImage, destroy: destroyStream } = useCameraStream()
 const { init: initProjector } = useCoordinateProjector()
 const { registerTarget, hotSwap } = useTargetRegistry()
 const targetStore = useTargetStore()
-const messageStore = useMessageStore()
 
 // ---------------------------------------------------------------------------
-// 路由参数
+// 路由参数（全部可选 — 直开模式下不需要任何参数）
 // ---------------------------------------------------------------------------
-const roomId = route.params.roomId
-const mindUrl = route.query.mindUrl
+const roomId = ref(route.params.roomId || '')
+const mindUrl = ref(route.query.mindUrl || null)
 
 // ---------------------------------------------------------------------------
 // 本地状态
 // ---------------------------------------------------------------------------
 const sceneReady = ref(false)
 const sceneError = ref(null)
-const loadingMessage = ref('正在初始化 AR 场景...')
-const isSecureContext = ref(
-  window.isSecureContext || window.location.hostname === 'localhost'
-)
+const loadingMessage = ref('正在启动摄像头...')
+const isSecureContext = ref(window.isSecureContext || window.location.hostname === 'localhost')
 const arContainerRef = ref(null)
+
+/** MindAR 追踪是否已激活（false = 纯相机模式） */
+const mindARActive = computed(() => targetStore.targetCount > 0)
 
 /** 拍照/编译处理中 */
 const isProcessing = ref(false)
@@ -192,117 +161,12 @@ const boardEmoji = computed(() => {
 /** 过渡蒙版引用 */
 const transitionRef = ref(null)
 
-/** Toast 消息队列 */
+/** Toast */
 const toasts = ref([])
 let toastIdCounter = 0
 
-// ---------------------------------------------------------------------------
-// 可见的 anchor 列表（响应式，TargetAnchor 组件绑定追踪位置）
-// ---------------------------------------------------------------------------
-const visibleAnchors = computed(() => {
-  return targetStore.anchorElements
-})
-
-// ---------------------------------------------------------------------------
-// 拍照流程：截帧 → 编译 → 合并 → 热交换
-// ---------------------------------------------------------------------------
-
-async function handleCapture() {
-  if (isProcessing.value) return
-
-  isProcessing.value = true
-  showToast('📷 正在截取画面...', 0)
-
-  try {
-    // Step 1: 从独立流截帧（零干扰 AR 渲染）
-    const img = await captureAsImage()
-    if (!img) {
-      // Fallback: 从 A-Frame 场景 video 截帧
-      const frame = captureCameraFrame()
-      if (!frame) {
-        showToast('❌ 无法获取摄像头画面，请确保已授权摄像头权限', 3000)
-        return
-      }
-      // Canvas → Image
-      const fallbackImg = new Image()
-      fallbackImg.src = frame.toDataURL('image/jpeg', 0.9)
-      await new Promise((resolve) => {
-        fallbackImg.onload = resolve
-        fallbackImg.onerror = () => {
-          showToast('❌ 图片处理失败', 3000)
-          resolve()
-        }
-      })
-      if (!fallbackImg.complete) return
-      await processNewTarget(fallbackImg)
-      return
-    }
-
-    await processNewTarget(img)
-
-  } catch (err) {
-    console.error('[ARView] 拍照处理失败:', err)
-    showToast(`❌ 处理失败: ${err.message}`, 3000)
-  } finally {
-    isProcessing.value = false
-  }
-}
-
-async function processNewTarget(img) {
-  // Step 2: 获取已有图片列表
-  const existingImages = targetStore.allImageElements
-
-  // Step 3: 合并编译（新图片 + 所有已有图片 → 单个 combined .mind）
-  showToast('🧠 正在提取图片特征...', 0)
-  const { blobUrl, newIndex } = await registerTarget(img, existingImages)
-
-  // 清除编译相关 toast
-  clearPersistentToasts()
-
-  // Step 4: 热交换 AR 追踪数据
-  const scene = document.querySelector('a-scene')
-  if (!scene) {
-    showToast('❌ AR 场景未就绪', 3000)
-    return
-  }
-
-  transitionRef.value?.show(`正在添加第 ${newIndex + 1} 个参照物...`)
-
-  try {
-    await hotSwap(scene, blobUrl, newIndex + 1, {
-      onTargetFound: (idx) => {
-        // 更新 MindAR 共享状态（供 EditorToolbar 等组件响应）
-        targetStates.value = { ...targetStates.value, [idx]: true }
-        targetDetected.value = true
-        activeTargetIndex.value = idx
-      },
-      onTargetLost: (idx) => {
-        targetStates.value = { ...targetStates.value, [idx]: false }
-        const anyDetected = Object.values(targetStates.value).some(v => v)
-        if (!anyDetected) {
-          targetDetected.value = false
-          activeTargetIndex.value = -1
-        }
-      },
-    })
-
-    // 成功
-    showToast(`✅ 新参照物就绪！共 ${newIndex + 1} 个目标`, 3000)
-
-  } catch (err) {
-    console.error('[ARView] 热交换失败:', err)
-    showToast('❌ 热交换失败，请刷新页面重试', 4000)
-  } finally {
-    transitionRef.value?.hide()
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 留言板
-// ---------------------------------------------------------------------------
-function openMessageBoard() {
-  boardVisible.value = true
-}
+/** 可见 anchor 列表 */
+const visibleAnchors = computed(() => targetStore.anchorElements)
 
 // ---------------------------------------------------------------------------
 // Toast
@@ -311,9 +175,7 @@ function showToast(message, duration = 2500) {
   const id = ++toastIdCounter
   toasts.value.push({ id, message })
   if (duration > 0) {
-    setTimeout(() => {
-      toasts.value = toasts.value.filter(t => t.id !== id)
-    }, duration)
+    setTimeout(() => { toasts.value = toasts.value.filter(t => t.id !== id) }, duration)
   }
 }
 
@@ -324,111 +186,266 @@ function clearPersistentToasts() {
 }
 
 // ---------------------------------------------------------------------------
-// 初始化 & 销毁
+// 拍照流程
+// ---------------------------------------------------------------------------
+
+async function handleCapture() {
+  if (isProcessing.value) return
+  isProcessing.value = true
+
+  try {
+    // Step 1: 截帧
+    showToast('📷 正在截取画面...', 0)
+    const img = await captureAsImage()
+    if (!img) {
+      const frame = captureCameraFrame()
+      if (!frame) {
+        showToast('❌ 无法获取摄像头画面', 3000)
+        return
+      }
+      const fallbackImg = new Image()
+      fallbackImg.src = frame.toDataURL('image/jpeg', 0.9)
+      await new Promise(r => { fallbackImg.onload = r; fallbackImg.onerror = r })
+      if (!fallbackImg.complete) return
+      await processCapture(fallbackImg)
+      return
+    }
+    await processCapture(img)
+  } catch (err) {
+    console.error('[ARView] 拍照失败:', err)
+    showToast(`❌ ${err.message}`, 3000)
+  } finally {
+    isProcessing.value = false
+  }
+}
+
+async function processCapture(img) {
+  // Step 2: 编译单图特征
+  showToast('🧠 正在提取图片特征...', 0)
+  const { mindBlob } = await compileImage(img)
+
+  clearPersistentToasts()
+
+  // Step 3: 判断是首次还是后续拍照
+  if (!mindARActive.value) {
+    // ================================================================
+    // 首次拍照：上传→创建房间→激活 MindAR→注册目标
+    // ================================================================
+    await handleFirstCapture(img, mindBlob)
+  } else {
+    // ================================================================
+    // 后续拍照：合并编译→热交换
+    // ================================================================
+    await handleSubsequentCapture(img)
+  }
+}
+
+/**
+ * 首次拍照：纯相机模式 → AR 追踪模式
+ */
+async function handleFirstCapture(img, mindBlob) {
+  showToast('☁️ 正在创建房间...', 0)
+
+  // 上传获取 roomId + mindUrl
+  const { newRoomId, newMindUrl, imageUrl } = await uploadFirstTarget(img, mindBlob)
+
+  roomId.value = newRoomId
+
+  // 缓存图片到 Store
+  const cacheImg = await loadImageFromUrl(imageUrl)
+  targetStore.addTarget(0, img, imageUrl, '📌')
+
+  // 在已有场景上激活 MindAR
+  const scene = document.querySelector('a-scene')
+  if (!scene) throw new Error('场景未就绪')
+
+  showToast('🎯 正在激活 AR 追踪...', 0)
+  await startMindAR(scene, newMindUrl, 1)
+
+  // 注册 anchor 到 Store
+  const anchor = scene.querySelector('[mindar-image-target]')
+  if (anchor) {
+    targetStore.registerAnchor(0, anchor)
+    // 初始化投影器
+    initProjector(scene)
+  }
+
+  targetStore.setActiveMindUrl(newMindUrl)
+
+  // 加入 Socket 房间
+  if (connected.value) joinRoom(newRoomId)
+
+  clearPersistentToasts()
+  showToast('✅ 第一个参照物就绪！对准它试试', 3000)
+
+  // 更新 URL（方便分享）
+  router.replace({ name: 'ARRoom', params: { roomId: newRoomId }, query: { mindUrl: newMindUrl, imageUrl } })
+}
+
+/**
+ * 后续拍照：合并编译→热交换
+ */
+async function handleSubsequentCapture(img) {
+  const existingImages = targetStore.allImageElements
+
+  showToast('🧠 正在合并编译...', 0)
+  const { blobUrl, newIndex } = await registerTarget(img, existingImages)
+
+  clearPersistentToasts()
+
+  const scene = document.querySelector('a-scene')
+  if (!scene) throw new Error('场景未就绪')
+
+  transitionRef.value?.show(`正在添加第 ${newIndex + 1} 个参照物...`)
+
+  try {
+    await hotSwap(scene, blobUrl, newIndex + 1, {
+      onTargetFound: (idx) => {
+        targetStates.value = { ...targetStates.value, [idx]: true }
+        targetDetected.value = true
+        activeTargetIndex.value = idx
+      },
+      onTargetLost: (idx) => {
+        targetStates.value = { ...targetStates.value, [idx]: false }
+        if (!Object.values(targetStates.value).some(v => v)) {
+          targetDetected.value = false
+          activeTargetIndex.value = -1
+        }
+      },
+    })
+    showToast(`✅ 新参照物就绪！共 ${newIndex + 1} 个目标`, 3000)
+  } catch (err) {
+    console.error('[ARView] 热交换失败:', err)
+    showToast('❌ 热交换失败，请刷新重试', 4000)
+  } finally {
+    transitionRef.value?.hide()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 上传
+// ---------------------------------------------------------------------------
+
+async function uploadFirstTarget(img, mindBlob) {
+  // 上传图片获取 roomId
+  const imgCanvas = document.createElement('canvas')
+  const maxSize = 2048
+  let w = img.naturalWidth, h = img.naturalHeight
+  if (w > maxSize) { h = Math.round(h * maxSize / w); w = maxSize }
+  if (h > maxSize) { w = Math.round(w * maxSize / h); h = maxSize }
+  imgCanvas.width = w; imgCanvas.height = h
+  imgCanvas.getContext('2d').drawImage(img, 0, 0, w, h)
+
+  const imageBlob = await new Promise((resolve, reject) => {
+    imgCanvas.toBlob(b => b ? resolve(b) : reject(new Error('toBlob 失败')), 'image/jpeg', 0.9)
+  })
+
+  const imgForm = new FormData()
+  imgForm.append('image', imageBlob, 'capture.jpg')
+  const imgRes = await fetch(`${API_BASE}/api/targets/image`, { method: 'POST', body: imgForm })
+  const imgData = await imgRes.json()
+  if (!imgData.success) throw new Error(imgData.error || '上传失败')
+
+  // 上传 .mind
+  const mindForm = new FormData()
+  mindForm.append('mind', mindBlob, 'target.mind')
+  mindForm.append('image', imageBlob, 'capture.jpg')
+  mindForm.append('roomId', imgData.roomId)
+  const mindRes = await fetch(`${API_BASE}/api/targets/mind`, { method: 'POST', body: mindForm })
+  const mindData = await mindRes.json()
+  if (!mindData.success) throw new Error(mindData.error || '.mind 上传失败')
+
+  return { newRoomId: imgData.roomId, newMindUrl: mindData.mindUrl, imageUrl: imgData.imageUrl }
+}
+
+// ---------------------------------------------------------------------------
+// 留言板
+// ---------------------------------------------------------------------------
+function openMessageBoard() {
+  boardVisible.value = true
+}
+
+// ---------------------------------------------------------------------------
+// 初始化
 // ---------------------------------------------------------------------------
 
 onMounted(async () => {
-  // --- 校验 ---
-  if (!roomId || !mindUrl) {
-    sceneError.value = '缺少房间 ID 或目标文件 URL。请返回首页重新创建。'
-    return
-  }
-
   if (!isSecureContext.value) {
     sceneError.value = '当前环境不是安全上下文。请使用 HTTPS 或 localhost 访问。'
     return
   }
 
+  // 如果没有 roomId，生成一个（首次拍照上传后服务端会重新分配）
+  if (!roomId.value) {
+    roomId.value = uuidv4().slice(0, 8)
+  }
+
   try {
-    // ===================================================================
-    // Step 1: 安装摄像头流拦截器（必须在 createARScene 之前！）
-    // ===================================================================
+    // Step 1: 安装摄像头流拦截器
     loadingMessage.value = '正在准备摄像头...'
     installStreamInterceptor()
 
-    // ===================================================================
-    // Step 2: 初始化初始目标到 Store（首个目标在 HomeView 中编译，这里注册）
-    // ===================================================================
-    // 首个目标不需要重新编译——它已经通过 mindUrl 参数传入。
-    // 记录到 targetStore 以便后续合并编译时使用。
-    targetStore.setActiveMindUrl(mindUrl)
+    // Step 2: 创建场景（纯相机模式或带 MindAR）
+    if (mindUrl.value) {
+      // 房间模式：直接激活追踪，同时缓存初始图片
+      loadingMessage.value = '正在启动 AR 追踪...'
+      await createARScene('ar-container', mindUrl.value, 1)
+      targetStore.setActiveMindUrl(mindUrl.value)
 
-    // 将初始图片缓存到 Store（从服务器返回的缩略图 URL 加载）
-    // 注意：HomeView 上传时也会返回 imageUrl，通过 query 参数传递
-    const initialImgUrl = route.query.imageUrl
-    if (initialImgUrl) {
-      try {
-        const initialImg = await loadImageFromUrl(initialImgUrl)
-        targetStore.addTarget(0, initialImg, initialImgUrl, '📌')
-      } catch {
-        console.warn('[ARView] 无法加载初始图片到缓存')
-        // 用占位 canvas 代替（后续拍照合并时会用到已有图片，但首图的 pixel data 可能不可用）
-        // 这是已知限制：第一次拍照时如果初始图片不在缓存中，合并编译只用新图
+      const initialImgUrl = route.query.imageUrl
+      if (initialImgUrl) {
+        try {
+          const initialImg = await loadImageFromUrl(initialImgUrl)
+          targetStore.addTarget(0, initialImg, initialImgUrl, '📌')
+        } catch { /* 图片不可用不影响 */ }
       }
+    } else {
+      // 直开模式：纯相机预览
+      await createARScene('ar-container', null, 0)
     }
 
-    // ===================================================================
-    // Step 3: 创建 AR 场景（初始 1 个 target）
-    // ===================================================================
-    loadingMessage.value = '正在启动摄像头...'
-    await createARScene('ar-container', mindUrl, 1)
-
-    // ===================================================================
-    // Step 4: 初始化 3D→2D 坐标投影器
-    // ===================================================================
+    // Step 3: 初始化投影器 & 注册 anchor
     const sceneEl = document.querySelector('a-scene')
-    if (sceneEl) {
+    if (sceneEl && mindUrl.value) {
       initProjector(sceneEl)
-      // 注册初始 anchor 到 Store
-      const initialAnchor = sceneEl.querySelector('[mindar-image-target]')
-      if (initialAnchor) {
-        targetStore.registerAnchor(0, initialAnchor)
-      }
+      const anchor = sceneEl.querySelector('[mindar-image-target]')
+      if (anchor) targetStore.registerAnchor(0, anchor)
     }
 
-    // ===================================================================
-    // Step 5: 注册协同监听、加入房间
-    // ===================================================================
+    // Step 4: 注册 Socket 监听 + 加入房间
     loadingMessage.value = '正在建立连接...'
     registerListeners()
 
-    if (connected.value) {
-      joinRoom(roomId)
+    if (connected.value && mindUrl.value) {
+      joinRoom(roomId.value)
     }
 
     let wasConnected = connected.value
     watch(connected, (isConnected) => {
-      if (isConnected && !wasConnected) {
-        console.log('[ARView] Socket 已重连，重新加入房间')
+      if (isConnected && !wasConnected && mindARActive.value) {
         registerListeners()
-        joinRoom(roomId)
+        joinRoom(roomId.value)
       }
       wasConnected = isConnected
     })
 
-    // ===================================================================
-    // Step 6: 注册移动端保护
-    // ===================================================================
+    // Step 5: 移动端保护
     registerMobileProtections()
 
-    // ===================================================================
-    // 就绪
-    // ===================================================================
     sceneReady.value = true
-    console.log('[ARView] ✅ AR 场景初始化完成')
+    console.log(`[ARView] ✅ 就绪 (模式: ${mindUrl.value ? '房间' : '直开'})`)
 
   } catch (err) {
-    console.error('[ARView] AR 场景初始化失败:', err)
+    console.error('[ARView] 初始化失败:', err)
     sceneError.value = err.message || '未知错误'
   }
 })
 
 onBeforeUnmount(() => {
   unregisterListeners()
-  leaveRoom()
   destroyARScene()
-  destroyStream()          // 释放克隆视频流
-  targetStore.reset()      // 清理 Store（释放 Blob URL 等）
+  destroyStream()
+  targetStore.reset()
   sceneReady.value = false
 })
 
@@ -437,21 +454,17 @@ onBeforeUnmount(() => {
 // ---------------------------------------------------------------------------
 
 function registerMobileProtections() {
-  // 1. iOS Safari 视频自动播放恢复
   const resumeVideo = () => {
     const video = document.querySelector('a-scene video')
-    if (video?.paused) {
-      video.play().catch(() => {})
-    }
+    if (video?.paused) video.play().catch(() => {})
   }
   document.addEventListener('click', resumeVideo, { once: true })
   document.addEventListener('touchend', resumeVideo, { once: true })
 
-  // 2. WebGL 上下文丢失保护
   const canvas = document.querySelector('a-scene canvas')
   if (canvas) {
     canvas.addEventListener('webglcontextlost', (e) => {
-      console.warn('[ARView] WebGL context lost, 请求恢复...')
+      console.warn('[ARView] WebGL context lost')
       e.preventDefault()
     })
     canvas.addEventListener('webglcontextrestored', () => {
@@ -459,19 +472,12 @@ function registerMobileProtections() {
     })
   }
 
-  // 3. visibilitychange — 切后台回来恢复摄像头
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
-      resumeVideo()
-    }
+    if (!document.hidden) resumeVideo()
   })
 
-  // 4. iOS 安全区 CSS 变量
   if (CSS.supports('padding-bottom', 'env(safe-area-inset-bottom)')) {
-    document.documentElement.style.setProperty(
-      '--safe-area-bottom',
-      'env(safe-area-inset-bottom, 0px)'
-    )
+    document.documentElement.style.setProperty('--safe-area-bottom', 'env(safe-area-inset-bottom, 0px)')
   }
 }
 
@@ -492,77 +498,53 @@ async function loadImageFromUrl(url) {
 function retryInit() {
   window.location.reload()
 }
-
-function goBack() {
-  router.push({ name: 'Home' })
-}
 </script>
 
 <style scoped>
-/* =========================================================================
-   ARView 样式 — 全屏 AR 画面
-   ========================================================================= */
-
 .ar-view {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  overflow: hidden;
-  background: #000;
+  position: fixed; top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  overflow: hidden; background: #000;
 }
 
-/* ---- AR 场景容器 ---- */
 .ar-container {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 1;
+  position: fixed; top: 0; left: 0;
+  width: 100%; height: 100%; z-index: 1;
 }
+.ar-container :deep(a-scene) { width: 100% !important; height: 100% !important; }
 
-.ar-container :deep(a-scene) {
-  width: 100% !important;
-  height: 100% !important;
+/* ---- 纯相机模式提示 ---- */
+.camera-hint {
+  position: fixed;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  text-align: center;
+  pointer-events: none;
 }
+.hint-icon { font-size: 56px; margin-bottom: 12px; }
+.hint-text { font-size: 20px; font-weight: 700; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,0.7); }
+.hint-sub { margin-top: 8px; font-size: 14px; color: rgba(255,255,255,0.7); text-shadow: 0 1px 4px rgba(0,0,0,0.7); }
 
 /* ---- 安全警告 ---- */
 .security-warning {
-  position: fixed;
-  top: 50%;
-  left: 50%;
+  position: fixed; top: 50%; left: 50%;
   transform: translate(-50%, -50%);
-  z-index: 100;
-  text-align: center;
-  background: rgba(239, 68, 68, 0.95);
-  color: #fff;
-  padding: 24px;
-  border-radius: var(--radius-lg);
+  z-index: 100; text-align: center;
+  background: rgba(239,68,68,0.95); color: #fff;
+  padding: 24px; border-radius: var(--radius-lg);
   max-width: 90vw;
 }
-
-.warning-sub {
-  font-size: var(--font-sm);
-  margin-top: 8px;
-  opacity: 0.85;
-}
+.warning-sub { font-size: var(--font-sm); margin-top: 8px; opacity: 0.85; }
 
 /* ---- 加载中 ---- */
 .loading-overlay {
-  position: fixed;
-  top: 0; left: 0;
-  width: 100%; height: 100%;
-  z-index: 100;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-primary);
-  gap: 20px;
+  position: fixed; top: 0; left: 0;
+  width: 100%; height: 100%; z-index: 100;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  background: var(--bg-primary); gap: 20px;
 }
-
 .loading-spinner {
   width: 40px; height: 40px;
   border: 3px solid rgba(255,255,255,0.15);
@@ -570,30 +552,18 @@ function goBack() {
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
-
 @keyframes spin { to { transform: rotate(360deg); } }
-
-.loading-text {
-  font-size: var(--font-base);
-  color: var(--text-secondary);
-}
+.loading-text { font-size: var(--font-base); color: var(--text-secondary); }
 
 /* ---- 错误 ---- */
 .error-overlay {
-  position: fixed;
-  top: 0; left: 0;
-  width: 100%; height: 100%;
-  z-index: 100;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
+  position: fixed; top: 0; left: 0;
+  width: 100%; height: 100%; z-index: 100;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
   background: var(--bg-primary);
-  padding: 24px;
-  text-align: center;
-  gap: 12px;
+  padding: 24px; text-align: center; gap: 12px;
 }
-
 .error-title { font-size: var(--font-xl); color: var(--text-primary); }
 .error-detail { font-size: var(--font-sm); color: var(--text-muted); margin-bottom: 16px; }
 .error-actions { display: flex; gap: 12px; }
