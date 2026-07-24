@@ -85,7 +85,7 @@
           class="tool-btn capture-btn"
           :class="{ 'capture-processing': isProcessing }"
           :disabled="isProcessing"
-          @click="$emit('capture')"
+          @pointerup.prevent="$emit('capture')"
           aria-label="拍摄新参照物"
         >
           <span class="capture-ring"></span>

@@ -210,31 +210,59 @@ function clearPersistentToasts() {
 async function handleCapture() {
   if (isProcessing.value) return
   isProcessing.value = true
+  showToast('📷 正在截取画面...', 0)
 
   try {
-    // Step 1: 截帧
-    showToast('📷 正在截取画面...', 0)
-    const img = await captureAsImage()
+    let img = null
+
+    // 优先：独立流截帧（Worker 管线）
+    try {
+      img = await captureAsImage()
+    } catch (e) {
+      console.warn('[ARView] 独立流截帧失败，回退:', e.message)
+    }
+
+    // 回退：直接从 A-Frame 场景 video 截帧
     if (!img) {
       const frame = captureCameraFrame()
       if (!frame) {
-        showToast('❌ 无法获取摄像头画面', 3000)
+        showToast('❌ 无法获取摄像头画面，请确认已授权摄像头权限', 3000)
         return
       }
-      const fallbackImg = new Image()
-      fallbackImg.src = frame.toDataURL('image/jpeg', 0.9)
-      await new Promise(r => { fallbackImg.onload = r; fallbackImg.onerror = r })
-      if (!fallbackImg.complete) return
-      await processCapture(fallbackImg)
-      return
+      img = await canvasToImage(frame)
+      if (!img) {
+        showToast('❌ 图片处理失败，请重试', 3000)
+        return
+      }
     }
-    await processCapture(img)
+
+    // 编译 + 上传/热交换
+    showToast('🧠 正在提取图片特征...', 0)
+    const { mindBlob } = await compileImage(img)
+    clearPersistentToasts()
+
+    if (!mindARActive.value) {
+      await handleFirstCapture(img, mindBlob)
+    } else {
+      await handleSubsequentCapture(img)
+    }
+
   } catch (err) {
     console.error('[ARView] 拍照失败:', err)
-    showToast(`❌ ${err.message}`, 3000)
+    showToast(`❌ ${err.message || '处理失败，请重试'}`, 3000)
   } finally {
     isProcessing.value = false
   }
+}
+
+/** canvas → Image 工具 */
+function canvasToImage(canvas) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => resolve(null)
+    img.src = canvas.toDataURL('image/jpeg', 0.9)
+  })
 }
 
 async function processCapture(img) {
