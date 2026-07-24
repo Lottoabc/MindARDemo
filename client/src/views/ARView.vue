@@ -150,7 +150,7 @@ const {
 
 const { connected } = useSocket()
 const { joinRoom, registerListeners, unregisterListeners } = useCollaboration()
-const { install: installStreamInterceptor, captureAsImage, destroy: destroyStream } = useCameraStream()
+const { install: installStreamInterceptor, captureAsImage, getCaptureVideo, destroy: destroyStream } = useCameraStream()
 const { init: initProjector } = useCoordinateProjector()
 const { registerTarget, hotSwap } = useTargetRegistry()
 const targetStore = useTargetStore()
@@ -453,19 +453,14 @@ async function handleStart() {
   }
 
   try {
-    // Step 0: 同步触发摄像头权限 + 获取用于背景预览的流
+    // Step 0: 同步触发摄像头权限请求（必须在用户手势窗口内）
     loadingMessage.value = '正在请求摄像头权限...'
-    const cameraStream = await navigator.mediaDevices.getUserMedia({
+    const tempStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
     })
-    console.log('[ARView] 摄像头权限已授予')
-
-    // 纯相机模式：在 raw video 上直接显示摄像头画面
-    // （因为 A-Frame 没有 MindAR 时不会渲染摄像头作为背景）
-    if (!mindUrl.value && rawVideoRef.value) {
-      rawVideoRef.value.srcObject = cameraStream
-      rawCameraActive.value = true
-    }
+    // 权限已拿到的，立即释放摄像头（否则 A-Frame 开第二路会冲突）
+    tempStream.getTracks().forEach(t => t.stop())
+    console.log('[ARView] 摄像头权限已授予，临时流已释放')
 
     // Step 1: 安装摄像头流拦截器（必须在 A-Frame 调用 getUserMedia 之前）
     loadingMessage.value = '正在启动摄像头...'
@@ -491,6 +486,15 @@ async function handleStart() {
       }
     } else {
       await createARScene('ar-container', null, 0)
+
+      // 纯相机模式：把克隆流的 video 拿来当背景预览
+      // （A-Frame 没有 MindAR 时不渲染摄像头画面）
+      const captureVideo = getCaptureVideo()
+      if (captureVideo && rawVideoRef.value) {
+        captureVideo.style.display = 'none' // 隐藏原始节点
+        rawVideoRef.value.srcObject = captureVideo.srcObject
+        rawCameraActive.value = true
+      }
     }
 
     // Step 3: 初始化投影器 & 注册 anchor

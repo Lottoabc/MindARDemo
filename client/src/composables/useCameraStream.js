@@ -407,10 +407,15 @@ export function useCameraStream() {
     console.log('[CameraStream] 资源已释放')
   }
 
+  function getCaptureVideo() {
+    return captureVideoEl
+  }
+
   return {
     install,
     captureAsImage,
     captureAsBlob,
+    getCaptureVideo,
     isCloneAvailable,
     startFrameMonitor,
     stopFrameMonitor,
