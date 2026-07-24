@@ -426,17 +426,26 @@ async function handleStart() {
     return
   }
 
-  // 如果没有 roomId，生成一个
-  if (!roomId.value) {
-    roomId.value = uuidv4().slice(0, 8)
-  }
-
   try {
-    // Step 1: 安装摄像头流拦截器
+    // Step 0: 同步触发摄像头权限请求（必须在用户手势窗口内）
+    loadingMessage.value = '正在请求摄像头权限...'
+    const tempStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
+    })
+    // 权限已授予，先停掉这个临时流（A-Frame 会自己申请）
+    tempStream.getTracks().forEach(t => t.stop())
+    console.log('[ARView] 摄像头权限已授予')
+
+    // Step 1: 安装摄像头流拦截器（必须在 A-Frame 调用 getUserMedia 之前）
     loadingMessage.value = '正在启动摄像头...'
     installStreamInterceptor()
 
-    // Step 2: 创建场景（纯相机模式或带 MindAR）
+    // 生成临时 roomId
+    if (!roomId.value) {
+      roomId.value = uuidv4().slice(0, 8)
+    }
+
+    // Step 2: 创建场景
     if (mindUrl.value) {
       loadingMessage.value = '正在启动 AR 追踪...'
       await createARScene('ar-container', mindUrl.value, 1)
