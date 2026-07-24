@@ -38,7 +38,7 @@
     />
 
     <!-- 纯相机模式提示：还没有任何参照物 -->
-    <div v-if="sceneReady && !mindARActive" class="camera-hint">
+    <div v-if="started && sceneReady && !mindARActive" class="camera-hint">
       <div class="hint-icon">📷</div>
       <p class="hint-text">摄像头已就绪</p>
       <p class="hint-sub">点击底部拍照按钮，创建第一个 AR 参照物</p>
@@ -67,8 +67,23 @@
     <!-- 热交换过渡蒙版 -->
     <TransitionOverlay ref="transitionRef" />
 
+    <!-- 开始界面：点击按钮后启动摄像头 -->
+    <div v-if="!started && !sceneError" class="start-overlay">
+      <div class="start-card">
+        <div class="start-icon">📷</div>
+        <h1 class="start-title">WebAR 扫描</h1>
+        <p class="start-desc">对准参照物图片，发现隐藏的留言与表情</p>
+        <button class="start-btn" @click="handleStart">
+          开始扫描
+        </button>
+        <p v-if="!isSecureContext" class="start-warn">
+          ⚠️ 需要 HTTPS 或 localhost 环境才能使用摄像头
+        </p>
+      </div>
+    </div>
+
     <!-- 场景加载中 -->
-    <div v-if="!sceneReady && !sceneError" class="loading-overlay">
+    <div v-if="started && !sceneReady && !sceneError" class="loading-overlay">
       <div class="loading-spinner"></div>
       <p class="loading-text">{{ loadingMessage }}</p>
     </div>
@@ -147,6 +162,9 @@ const arContainerRef = ref(null)
 
 /** MindAR 追踪是否已激活（false = 纯相机模式） */
 const mindARActive = computed(() => targetStore.targetCount > 0)
+
+/** 是否已点击开始 */
+const started = ref(false)
 
 /** 拍照/编译处理中 */
 const isProcessing = ref(false)
@@ -369,25 +387,29 @@ function openMessageBoard() {
 // 初始化
 // ---------------------------------------------------------------------------
 
-onMounted(async () => {
+/**
+ * 点击"开始扫描"按钮 → 初始化摄像头和 AR 场景
+ */
+async function handleStart() {
+  started.value = true
+
   if (!isSecureContext.value) {
     sceneError.value = '当前环境不是安全上下文。请使用 HTTPS 或 localhost 访问。'
     return
   }
 
-  // 如果没有 roomId，生成一个（首次拍照上传后服务端会重新分配）
+  // 如果没有 roomId，生成一个
   if (!roomId.value) {
     roomId.value = uuidv4().slice(0, 8)
   }
 
   try {
     // Step 1: 安装摄像头流拦截器
-    loadingMessage.value = '正在准备摄像头...'
+    loadingMessage.value = '正在启动摄像头...'
     installStreamInterceptor()
 
     // Step 2: 创建场景（纯相机模式或带 MindAR）
     if (mindUrl.value) {
-      // 房间模式：直接激活追踪，同时缓存初始图片
       loadingMessage.value = '正在启动 AR 追踪...'
       await createARScene('ar-container', mindUrl.value, 1)
       targetStore.setActiveMindUrl(mindUrl.value)
@@ -397,10 +419,9 @@ onMounted(async () => {
         try {
           const initialImg = await loadImageFromUrl(initialImgUrl)
           targetStore.addTarget(0, initialImg, initialImgUrl, '📌')
-        } catch { /* 图片不可用不影响 */ }
+        } catch { /* ignore */ }
       }
     } else {
-      // 直开模式：纯相机预览
       await createARScene('ar-container', null, 0)
     }
 
@@ -439,6 +460,10 @@ onMounted(async () => {
     console.error('[ARView] 初始化失败:', err)
     sceneError.value = err.message || '未知错误'
   }
+}
+
+onMounted(() => {
+  // 页面挂载后不做任何事，等待用户点击"开始扫描"
 })
 
 onBeforeUnmount(() => {
@@ -525,6 +550,36 @@ function retryInit() {
 .hint-icon { font-size: 56px; margin-bottom: 12px; }
 .hint-text { font-size: 20px; font-weight: 700; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,0.7); }
 .hint-sub { margin-top: 8px; font-size: 14px; color: rgba(255,255,255,0.7); text-shadow: 0 1px 4px rgba(0,0,0,0.7); }
+
+/* ---- 开始界面 ---- */
+.start-overlay {
+  position: fixed; top: 0; left: 0;
+  width: 100%; height: 100%; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  background: #0f172a;
+  padding: 24px;
+}
+.start-card {
+  text-align: center;
+  max-width: 360px;
+}
+.start-icon { font-size: 64px; margin-bottom: 16px; }
+.start-title { font-size: 28px; font-weight: 800; color: #fff; letter-spacing: -0.5px; }
+.start-desc { margin-top: 12px; font-size: 15px; color: #94a3b8; line-height: 1.5; }
+.start-btn {
+  margin-top: 32px;
+  padding: 16px 48px;
+  font-size: 18px; font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1, #818cf8);
+  border: none; border-radius: 16px;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: 0 4px 20px rgba(99,102,241,0.4);
+  -webkit-tap-highlight-color: transparent;
+}
+.start-btn:active { transform: scale(0.96); box-shadow: 0 2px 10px rgba(99,102,241,0.3); }
+.start-warn { margin-top: 20px; font-size: 12px; color: #f59e0b; }
 
 /* ---- 安全警告 ---- */
 .security-warning {
