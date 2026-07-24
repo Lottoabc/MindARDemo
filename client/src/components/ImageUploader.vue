@@ -1,10 +1,10 @@
 <!--
-  ImageUploader.vue — 图片采集 + 裁剪组件
+  ImageUploader.vue — 图片采集组件
   ============================================================================
   流程：
     1. 拍照或从相册选择图片
-    2. Cropper.js 裁剪感兴趣区域（AR 触发目标）
-    3. 确认后触发 MindAR 编译流程
+    2. 自动加载并触发 MindAR 编译流程
+    3. 显示编译进度 / 结果
 -->
 <template>
   <div class="uploader">
@@ -35,30 +35,11 @@
     </div>
 
     <!-- ================================================================= -->
-    <!-- 状态 2：裁剪模式 — 用户调整裁剪区域 -->
-    <!-- ================================================================= -->
-    <div v-else-if="cropMode" class="uploader-preview">
-      <div class="crop-wrapper">
-        <img ref="cropImgRef" :src="imageSrc" alt="裁剪图片" class="crop-image" />
-      </div>
-      <div class="preview-actions">
-        <p class="crop-hint">👆 拖动调整裁剪区域，框选出 AR 触发目标</p>
-        <button class="btn btn-primary" style="width:100%" @click="confirmCrop">
-          ✂️ 确认裁剪
-        </button>
-        <button class="btn btn-ghost" @click="resetImage">
-          ↩ 重选图片
-        </button>
-      </div>
-    </div>
-
-    <!-- ================================================================= -->
-    <!-- 状态 3：裁剪完成 / 处理中 / 结果 -->
+    <!-- 状态 2：已选图 — 预览 + 处理中 / 错误 / 成功 -->
     <!-- ================================================================= -->
     <div v-else class="uploader-preview">
-      <!-- 裁剪后的预览图 -->
       <div class="preview-image-wrapper">
-        <img :src="croppedSrc || imageSrc" alt="AR 触发图片预览" class="preview-image" />
+        <img :src="imageSrc" alt="AR 触发图片预览" class="preview-image" />
       </div>
 
       <!-- 处理中 -->
@@ -91,13 +72,17 @@
         <p v-if="autoEnterCountdown > 0" class="auto-enter-hint">{{ autoEnterCountdown }} 秒后自动进入...</p>
         <p class="room-id-display">房间号: <strong>{{ roomId }}</strong></p>
       </div>
+
+      <!-- 已选图但还没开始处理时的重选按钮 -->
+      <div v-else class="preview-actions">
+        <button class="btn btn-ghost" @click="resetImage">↩ 重新选择图片</button>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
-import Cropper from 'cropperjs'
+import { ref } from 'vue'
 
 // ---------------------------------------------------------------------------
 // Props & Emits
@@ -125,11 +110,7 @@ const emit = defineEmits([
 // ---------------------------------------------------------------------------
 // 本地状态
 // ---------------------------------------------------------------------------
-const imageSrc = ref(null)
-const croppedSrc = ref(null)
-const cropMode = ref(false)
-const cropImgRef = ref(null)
-let cropperInstance = null
+const imageSrc = ref(null)   // dataURL，用于预览
 
 // ---------------------------------------------------------------------------
 // 方法
@@ -149,135 +130,29 @@ function onFileChange(event) {
   const reader = new FileReader()
   reader.onload = (e) => {
     imageSrc.value = e.target.result
-    cropMode.value = true
-    // 等 Vue 渲染完 + 图片加载完再初始化 Cropper
-    nextTick(() => {
-      if (cropImgRef.value) {
-        // 图片可能已加载，也可能还没 —— Cropper 2 会自动处理
-        initCropper()
-      }
-    })
+
+    // 加载图片，控制分辨率后发射
+    const img = new Image()
+    img.onload = () => {
+      emit('image-loaded', img)
+      // 生成分辨率受控的 Blob（最大 2048px，用于上传）
+      canvasToBlob(img, 2048, 2048).then(blob => {
+        emit('image-blob-ready', blob)
+      })
+    }
+    img.src = e.target.result
   }
   reader.readAsDataURL(file)
 }
 
-function initCropper() {
-  if (!cropImgRef.value) return
-  if (cropperInstance) {
-    cropperInstance.destroy()
-    cropperInstance = null
-  }
-  try {
-    cropperInstance = new Cropper(cropImgRef.value, {
-      aspectRatio: 1,
-      viewMode: 1,
-      autoCropArea: 0.8,
-      movable: true,
-      zoomable: true,
-      responsive: true,
-      guides: true,
-      background: false,
-      ready() {
-        console.log('[Cropper] 裁剪器已就绪')
-      },
-    })
-  } catch (err) {
-    console.error('[Cropper] 初始化失败:', err)
-    // 裁剪失败，跳过裁剪直接编译原图
-    skipCrop()
-  }
-}
-
-function skipCrop() {
-  // 清理 cropper
-  if (cropperInstance) {
-    cropperInstance.destroy()
-    cropperInstance = null
-  }
-  // 不裁剪，直接用原图编译
-  cropMode.value = false
-  const img = new Image()
-  img.onload = () => {
-    emit('image-loaded', img)
-    // 从原图生成 Blob，保持合理分辨率用于上传
-    canvasToBlob(img, img.naturalWidth, img.naturalHeight).then(blob => {
-      emit('image-blob-ready', blob)
-    })
-  }
-  img.src = imageSrc.value
-}
-
-function confirmCrop() {
-  if (!cropperInstance) {
-    skipCrop()
-    return
-  }
-
-  try {
-    // 获取裁剪区域在原始图片上的实际尺寸
-    const cropData = cropperInstance.getData()
-    const cropW = Math.round(cropData.width)
-    const cropH = Math.round(cropData.height)
-
-    // 计算合理的输出分辨率：最大 2048px，不放大，保持清晰度
-    const MAX_SIZE = 2048
-    let outW = Math.min(cropW, MAX_SIZE)
-    let outH = Math.min(cropH, MAX_SIZE)
-
-    const canvas = cropperInstance.getCroppedCanvas({
-      width: outW,
-      height: outH,
-    })
-
-    if (!canvas) {
-      console.warn('[Cropper] getCroppedCanvas 返回空，使用原图')
-      skipCrop()
-      return
-    }
-
-    console.log(`[ImageUploader] 裁剪输出: ${outW}x${outH} (原始区域: ${cropW}x${cropH})`)
-
-    croppedSrc.value = canvas.toDataURL('image/jpeg', 0.92)
-    cropMode.value = false
-
-    cropperInstance.destroy()
-    cropperInstance = null
-
-    const img = new Image()
-    img.onload = () => {
-      console.log('[ImageUploader] 裁剪后图片已就绪:', img.width, 'x', img.height)
-      emit('image-loaded', img)
-    }
-    img.onerror = () => {
-      console.warn('[ImageUploader] 裁剪图片加载失败，使用原图')
-      skipCrop()
-    }
-    img.src = croppedSrc.value
-
-    // 生成 Blob 用于上传（替换原始文件）
-    canvasToBlob(canvas).then(blob => {
-      emit('image-blob-ready', blob)
-    })
-  } catch (err) {
-    console.error('[Cropper] 裁剪失败:', err)
-    skipCrop()
-  }
-}
-
 /**
- * 将 img/canvas 转为 JPEG Blob，保证输出分辨率可控
- * @param {HTMLImageElement|HTMLCanvasElement} source
- * @param {number} [maxWidth] - 输出最大宽度
- * @param {number} [maxHeight] - 输出最大高度
- * @param {number} [quality=0.92] - JPEG 质量
- * @returns {Promise<Blob>}
+ * 将 img 转为 JPEG Blob，输出分辨率可控
  */
 function canvasToBlob(source, maxWidth, maxHeight, quality = 0.92) {
   return new Promise((resolve, reject) => {
     let w = source.naturalWidth || source.width
     let h = source.naturalHeight || source.height
 
-    // 如果指定了最大尺寸且源图更大，等比缩放
     if (maxWidth && w > maxWidth) {
       const ratio = maxWidth / w
       w = maxWidth
@@ -306,13 +181,7 @@ function canvasToBlob(source, maxWidth, maxHeight, quality = 0.92) {
 }
 
 function resetImage() {
-  if (cropperInstance) {
-    cropperInstance.destroy()
-    cropperInstance = null
-  }
   imageSrc.value = null
-  croppedSrc.value = null
-  cropMode.value = false
   emit('reset')
 }
 </script>
@@ -334,13 +203,8 @@ function resetImage() {
 .upload-btn { position: relative; width: 100%; cursor: pointer; }
 .file-input { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 
-/* ---- 裁剪模式 ---- */
-.uploader-preview { background: var(--bg-card); border-radius: var(--radius-lg); overflow: hidden; }
-.crop-wrapper { width: 100%; max-height: 60vh; background: #000; }
-.crop-image { max-width: 100%; display: block; }
-.crop-hint { font-size: var(--font-sm); color: var(--text-secondary); text-align: center; margin-bottom: 4px; }
-
 /* ---- 预览 ---- */
+.uploader-preview { background: var(--bg-card); border-radius: var(--radius-lg); overflow: hidden; }
 .preview-image-wrapper {
   width: 100%; aspect-ratio: 1 / 1;
   display: flex; align-items: center; justify-content: center;

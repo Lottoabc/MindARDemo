@@ -94,10 +94,7 @@ const { compileImage, compileProgress, isCompiling, compileError } = useMindAR()
 // 本地状态
 // ---------------------------------------------------------------------------
 
-/** 上传的原始图片文件（用于后续上传缩略图） */
-const selectedImageFile = ref(null)
-
-/** 裁剪 / 处理后用于上传的图片 Blob（高分辨率） */
+/** 处理后用于上传的图片 Blob（分辨率控制在 2048px 以内） */
 const selectedImageBlob = ref(null)
 
 /** 用户选择的图片的 HTMLImageElement（用于编译器输入） */
@@ -134,32 +131,37 @@ const statusMessage = ref('')
  * @param {File} file - 图片文件
  */
 function handleImageSelected(file) {
-  selectedImageFile.value = file
-  selectedImageBlob.value = null  // 等裁剪/确认后再填充
+  selectedImageBlob.value = null
   console.log('[HomeView] 图片已选择:', file.name, `(${(file.size / 1024).toFixed(1)} KB)`)
 }
 
 /**
- * 裁剪/处理完成后，拿到高分辨率 Blob 用于上传
- * @param {Blob} blob - 处理后（裁剪或原图缩放）的 JPEG Blob
+ * 图片加载完成（已创建 HTMLImageElement）
+ * 仅保存引用，实际编译流程在拿到 Blob 后触发
+ * @param {HTMLImageElement} img - 加载好的图片元素
  */
-function handleImageBlobReady(blob) {
-  selectedImageBlob.value = blob
-  console.log('[HomeView] 收到处理后的图片 Blob:', `${(blob.size / 1024).toFixed(1)} KB`)
+function handleImageLoaded(img) {
+  imageElement.value = img
+  console.log('[HomeView] 图片已就绪:', img.naturalWidth, 'x', img.naturalHeight)
 }
 
 /**
- * 图片加载完成（已创建 HTMLImageElement）
- * 接下来执行编译流程
- * @param {HTMLImageElement} img - 加载好的图片元素
+ * 分辨率受控的 Blob 已就绪，开始编译 + 上传
+ * @param {Blob} blob - JPEG Blob（最多 2048px）
  */
-async function handleImageLoaded(img) {
-  imageElement.value = img
+async function handleImageBlobReady(blob) {
+  selectedImageBlob.value = blob
+  console.log('[HomeView] 收到处理后的图片 Blob:', `${(blob.size / 1024).toFixed(1)} KB`)
+
+  if (!imageElement.value) {
+    console.warn('[HomeView] imageElement 尚未就绪，中断')
+    return
+  }
 
   try {
     // 第一步：客户端编译
     statusMessage.value = '正在分析图片特征...'
-    const result = await compileImage(img)
+    const result = await compileImage(imageElement.value)
     mindBlob.value = result.mindBlob
 
     // 第二步：上传 .mind 文件到服务端
@@ -185,16 +187,14 @@ async function uploadMindFile(blob) {
   const formData = new FormData()
   formData.append('mind', blob, 'target.mind')
 
-  // 优先使用裁剪后的高分辨率 Blob，否则回退到原始文件
-  const imageForUpload = selectedImageBlob.value || selectedImageFile.value
-  if (imageForUpload) {
-    formData.append('image', imageForUpload, 'image.jpg')
+  if (selectedImageBlob.value) {
+    formData.append('image', selectedImageBlob.value, 'image.jpg')
   }
 
   // 如果没有 roomId，先上传图片获取
   if (!roomId.value) {
     const imgFormData = new FormData()
-    imgFormData.append('image', imageForUpload, 'image.jpg')
+    imgFormData.append('image', selectedImageBlob.value, 'image.jpg')
     const imgRes = await fetch(`${API_BASE}/api/targets/image`, {
       method: 'POST',
       body: imgFormData,
@@ -268,7 +268,6 @@ function resetState() {
     countdownTimer = null
   }
   autoEnterCountdown.value = 0
-  selectedImageFile.value = null
   selectedImageBlob.value = null
   imageElement.value = null
   mindBlob.value = null
